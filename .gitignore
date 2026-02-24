@@ -1,0 +1,22 @@
+SSL/*
+!SSL/.gitkeep
+
+uploads/*
+!uploads/.gitkeep
+
+assets_storage/*
+!assets_storage/.gitkeep
+
+bin/*
+!bin/.gitkeep
+
+# Local environment secrets (never commit)
+.env
+.env.*
+!.env.example
+
+# Keys / lockfile (never commit)
+private_key.pem
+public_key.pem
+pubspec.lock
+jwt_secrets.txt
