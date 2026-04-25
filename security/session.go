@@ -44,21 +44,23 @@ func StoreSessionKey(username string, sessionKey *SessionKey) error {
 // GetUserSessionKey 获取用户的会话密钥（按用户名，兼容旧逻辑）
 func GetUserSessionKey(username string) (*SessionKey, error) {
 	globalSessionManager.mutex.RLock()
-	defer globalSessionManager.mutex.RUnlock()
-
 	sessionData, exists := globalSessionManager.sessions[username]
 	if !exists {
+		globalSessionManager.mutex.RUnlock()
 		return nil, fmt.Errorf("用户 %s 的会话密钥不存在", username)
 	}
 
-	// 检查会话是否过期
+	// 过期判断后切换到写锁再删除，避免在读锁中写 map 造成并发问题
 	if time.Now().After(sessionData.ExpiresAt) {
-		// 清理过期会话
+		globalSessionManager.mutex.RUnlock()
+		globalSessionManager.mutex.Lock()
 		delete(globalSessionManager.sessions, username)
+		globalSessionManager.mutex.Unlock()
 		return nil, fmt.Errorf("用户 %s 的会话密钥已过期", username)
 	}
-
-	return sessionData.SessionKey, nil
+	key := sessionData.SessionKey
+	globalSessionManager.mutex.RUnlock()
+	return key, nil
 }
 
 // StoreSessionKeyForSession 存储会话密钥（按会话ID/JTI）
@@ -81,19 +83,22 @@ func StoreSessionKeyForSession(sessionID string, sessionKey *SessionKey) error {
 // GetSessionKeyBySessionID 按会话ID/JTI获取会话密钥
 func GetSessionKeyBySessionID(sessionID string) (*SessionKey, error) {
 	globalSessionManager.mutex.RLock()
-	defer globalSessionManager.mutex.RUnlock()
-
 	sessionData, exists := globalSessionManager.sessions[sessionID]
 	if !exists {
+		globalSessionManager.mutex.RUnlock()
 		return nil, fmt.Errorf("会话 %s 的会话密钥不存在", sessionID)
 	}
 
 	if time.Now().After(sessionData.ExpiresAt) {
+		globalSessionManager.mutex.RUnlock()
+		globalSessionManager.mutex.Lock()
 		delete(globalSessionManager.sessions, sessionID)
+		globalSessionManager.mutex.Unlock()
 		return nil, fmt.Errorf("会话 %s 的会话密钥已过期", sessionID)
 	}
-
-	return sessionData.SessionKey, nil
+	key := sessionData.SessionKey
+	globalSessionManager.mutex.RUnlock()
+	return key, nil
 }
 
 // RemoveSessionKey 移除用户的会话密钥

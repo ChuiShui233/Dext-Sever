@@ -10,17 +10,17 @@ import (
 
 // 验证URL是否安全
 func IsSafeURL(urlStr string) bool {
-    // 允许同源相对资源路径（无协议主机），例如由服务端返回的 OpenAssets 相对URL
-    if strings.HasPrefix(urlStr, "/openassets/files/") {
-        // 严格路径校验，防止 ../ 与重复分隔符
-        if strings.Contains(urlStr, "..") || strings.Contains(urlStr, "//") {
-            return false
-        }
-        return true
-    }
+	// 允许同源相对资源路径（无协议主机），例如由服务端返回的 OpenAssets 相对URL
+	if strings.HasPrefix(urlStr, "/openassets/files/") {
+		// 严格路径校验，防止 ../ 与重复分隔符
+		if strings.Contains(urlStr, "..") || strings.Contains(urlStr, "//") {
+			return false
+		}
+		return true
+	}
 
-    // 解析URL
-    parsedURL, err := url.Parse(urlStr)
+	// 解析URL
+	parsedURL, err := url.Parse(urlStr)
 	if err != nil {
 		return false
 	}
@@ -53,9 +53,9 @@ func IsSafeURL(urlStr string) bool {
 	// 检查是否是IP地址
 	ip := net.ParseIP(host)
 	if ip != nil {
-		// 检查是否是私有IP地址
+		// 拒绝私有/环回地址，防止 SSRF 访问内网服务
 		if ip.IsPrivate() || ip.IsLoopback() {
-			return true
+			return false
 		}
 		// 检查是否是特殊IP地址
 		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
