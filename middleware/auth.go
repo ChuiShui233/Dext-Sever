@@ -121,7 +121,7 @@ func DecryptMiddleware() gin.HandlerFunc {
 							log.Printf("无效的 X-Client-Ephemeral-Key: %v", err)
 						}
 					}
-			}
+				}
 			}
 			c.Request.Body = ioutil.NopCloser(bytes.NewReader(body))
 			c.Next()
@@ -295,7 +295,7 @@ func EncryptResponseMiddleware() gin.HandlerFunc {
 		// 创建自定义响应写入器
 		responseWriter := &encryptResponseWriter{
 			ResponseWriter: originalWriter,
-			body:          &bytes.Buffer{},
+			body:           &bytes.Buffer{},
 			encryptionType: encryptionType,
 		}
 
@@ -387,9 +387,9 @@ func EncryptResponseMiddleware() gin.HandlerFunc {
 // encryptResponseWriter 自定义响应写入器
 type encryptResponseWriter struct {
 	gin.ResponseWriter
-	body          *bytes.Buffer
+	body           *bytes.Buffer
 	encryptionType string
-	statusCode    int
+	statusCode     int
 }
 
 func (w *encryptResponseWriter) Write(b []byte) (int, error) {
@@ -524,7 +524,7 @@ func OptionalAuthMiddleware() gin.HandlerFunc {
 		} else {
 			authHeader = c.GetHeader("Authorization")
 		}
-		
+
 		// 如果没有认证信息，直接跳过
 		if authHeader == "" {
 			c.Next()
@@ -596,9 +596,7 @@ func CorsMiddleware() gin.HandlerFunc {
 
 		// 允许的域名列表
 		allowedOrigins := []string{
-			"https://wucode.xyz",
-			"https://www.wucode.xyz",
-			"https://dext.wucode.xyz",
+			"https://qs.chuishui.top",
 			"http://localhost:8001",
 			"http://127.0.0.1:8001",
 			"http://192.168.1.4:8001",
@@ -607,8 +605,8 @@ func CorsMiddleware() gin.HandlerFunc {
 		// 检查是否为pages.dev域名
 		isPagesDev := strings.HasSuffix(origin, ".pages.dev")
 
-		// 检查是否为wucode.xyz的子域名
-		isWucodeSubdomain := strings.HasSuffix(origin, ".wucode.xyz") || origin == "https://wucode.xyz"
+		// 检查是否为chuishui.top的子域名
+		isWucodeSubdomain := strings.HasSuffix(origin, ".chuishui.top") || origin == "https://chuishui.top"
 
 		// 检查是否在允许列表中
 		allowed := false

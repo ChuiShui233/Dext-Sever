@@ -2,10 +2,12 @@ package main
 
 import (
 	"Dext-Server/config"
+	"Dext-Server/env"
 	"Dext-Server/middleware"
 	"Dext-Server/module/analytics"
 	"Dext-Server/module/answer"
 	"Dext-Server/module/assets"
+	"Dext-Server/module/clean"
 	"Dext-Server/module/email"
 	"Dext-Server/module/oauth"
 	"Dext-Server/module/project"
@@ -45,6 +47,7 @@ func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found")
 	}
+	env.Init()
 
 	// 初始化私钥
 	if err := security.InitPrivateKey(); err != nil {
@@ -129,10 +132,10 @@ func main() {
 		MaxUserStorage: 1024 * 1024 * 1024, // 1GB
 		AuthRequired:   true,
 		AllowedTypes: map[string]bool{
-			"image/jpeg": true, "image/jpg": true, "image/png": true, "image/gif": true, "image/webp": true, "image/bmp": true, "image/tiff": true, "image/svg+xml": true, "image/ico": true, "image/heic": true, "image/heif": true, "image/avif": true, "image/jxl": true,
+			"image/jpeg": true, "image/jpg": true, "image/png": true, "image/gif": true, "image/webp": true, "image/bmp": true, "image/tiff": true, "image/ico": true, "image/heic": true, "image/heif": true, "image/avif": true, "image/jxl": true,
 			"video/mp4": true, "video/webm": true, "video/avi": true, "video/mov": true, "video/wmv": true, "video/flv": true, "video/mkv": true, "video/3gp": true,
 			"audio/mpeg": true, "audio/wav": true, "audio/ogg": true, "audio/mp3": true, "audio/aac": true, "audio/flac": true, "audio/wma": true,
-			"application/pdf": true, "text/plain": true, "application/json": true, "application/xml": true, "text/html": true, "text/css": true, "text/javascript": true, "application/javascript": true,
+			"application/pdf": true, "text/plain": true, "application/json": true, "application/xml": true,
 		},
 	}
 
@@ -144,6 +147,14 @@ func main() {
 
 	// 设置 media 模块的 OpenAssets 服务实例
 	media.SetOpenAssetsService(openAssetsService)
+
+	// 初始化清理模块
+	clean.InitCleaner()
+	log.Println("清理模块已初始化")
+
+	// 启动自动清理（在后台运行）
+	go clean.StartAutoCleanupOnBoot()
+	log.Println("自动清理服务已启动")
 
 	// 主应用 Gin 路由器
 	router := gin.Default()
@@ -164,6 +175,14 @@ func main() {
 		middleware.DecryptMiddleware(),
 		middleware.EncryptResponseMiddleware(),
 	)
+
+	// 处理未找到的路由，强制断开连接
+	router.NoRoute(func(c *gin.Context) {
+		c.Writer.WriteHeaderNow()
+		if f, ok := c.Writer.(http.Flusher); ok {
+			f.Flush()
+		}
+	})
 
 	// ===================================================================
 	// 主应用 API 路由
@@ -243,14 +262,14 @@ func main() {
 		protectedGroup.POST("/answer/submit", answer.SubmitAnswerHandler)
 		protectedGroup.GET("/answer/list/:surveyId", answer.GetAnswersHandler)
 		protectedGroup.GET("/answer/:id", answer.GetAnswerByIDHandler)
-		protectedGroup.DELETE("/answer/:id", answer.DeleteAnswerHandler)                          // 物理删除 (仅创建者)
-		protectedGroup.DELETE("/answers/batch", answer.BatchDeleteAnswersHandler)                 // 批量物理删除 (仅创建者)
-		protectedGroup.POST("/answer/logic-delete/:id", answer.LogicDeleteAnswerHandler)          // 逻辑删除
-		protectedGroup.POST("/answers/batch-logic-delete", answer.BatchLogicDeleteAnswersHandler) // 批量逻辑删除
+		protectedGroup.DELETE("/answer/:id", answer.DeleteAnswerHandler)
+		protectedGroup.DELETE("/answers/batch", answer.BatchDeleteAnswersHandler)
+		protectedGroup.POST("/answer/logic-delete/:id", answer.LogicDeleteAnswerHandler)
+		protectedGroup.POST("/answers/batch-logic-delete", answer.BatchLogicDeleteAnswersHandler)
 		// 回收站 API
-		protectedGroup.GET("/answer/recycle-bin/:surveyId", answer.GetDeletedAnswersHandler)         // 获取回收站列表
-		protectedGroup.POST("/answer/recycle-bin/restore/:id", answer.RestoreAnswerHandler)          // 恢复单个答卷
-		protectedGroup.POST("/answers/recycle-bin/batch-restore", answer.BatchRestoreAnswersHandler) // 批量恢复答卷
+		protectedGroup.GET("/answer/recycle-bin/:surveyId", answer.GetDeletedAnswersHandler)
+		protectedGroup.POST("/answer/recycle-bin/restore/:id", answer.RestoreAnswerHandler)
+		protectedGroup.POST("/answers/recycle-bin/batch-restore", answer.BatchRestoreAnswersHandler)
 		// 上传文件相关API
 		protectedGroup.GET("/user/current", user.GetCurrentUserHandler)
 		protectedGroup.POST("/user/generate-token", user.GenerateCustomTokenHandler)
@@ -279,15 +298,6 @@ func main() {
 		protectedGroup.PUT("/survey/:surveyId/background", media.UpdateSurveyBackgroundHandler)
 		protectedGroup.GET("/survey/:surveyId/background", media.GetSurveyBackgroundHandler)
 
-		// 图像管理 API
-		protectedGroup.POST("/images/upload", media.UploadImageHandler)
-		protectedGroup.GET("/images/list", media.GetImagesHandler)
-		protectedGroup.GET("/images/:imageId", media.GetImageHandler)
-		protectedGroup.DELETE("/images/:imageId", media.DeleteImageHandler)
-		protectedGroup.GET("/images/storage", media.GetUserImageStorageHandler)
-		protectedGroup.POST("/images/batch-upload", media.BatchUploadImagesHandler)
-		protectedGroup.DELETE("/images/batch-delete", media.BatchDeleteImagesHandler)
-
 		// 头像上传API
 		protectedGroup.POST("/user/avatar/upload", media.UploadAvatarHandler)
 		// 用户名修改API
@@ -300,6 +310,15 @@ func main() {
 	}
 
 	router.Static("/uploads", "./uploads")
+
+	// 自定义静态文件处理器，访问目录时重定向到指定页面
+	router.GET("/static", func(c *gin.Context) {
+		// 当访问 /static 目录时，重定向到 privacy.html 页面
+		c.Redirect(http.StatusMovedPermanently, "/static/privacy.html")
+	})
+
+	// 使用标准静态文件服务，避免路径拼接导致目录穿越
+	router.StaticFS("/static", http.Dir("./static"))
 	router.POST("/api/getCaptcha", utils.GetCaptchaHandler)
 	router.POST("/api/verifyCaptcha", utils.VerifyCaptchaHandler)
 

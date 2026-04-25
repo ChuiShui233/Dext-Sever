@@ -62,19 +62,42 @@ func (sm *SessionManager) CreateSession(userID, token, ipAddress, userAgent stri
 // ValidateSession 验证会话有效性
 func (sm *SessionManager) ValidateSession(token string) (*Session, error) {
 	// 先尝试直接验证JWT令牌
+	if sm.IsTokenBlacklisted(token) {
+		return nil, fmt.Errorf("token has been revoked")
+	}
 	if claims, err := security.ParseTokenClaims(token); err == nil {
 		// JWT有效，检查用户是否存在
-		var userID, username string
-		err := sm.db.QueryRow("SELECT id, username FROM users WHERE id = ?", claims.Subject).Scan(&userID, &username)
+		var userID string
+		err := sm.db.QueryRow("SELECT id FROM users WHERE id = ?", claims.Subject).Scan(&userID)
+		tokenHash := hashToken(token)
+		var session Session
 		if err != nil {
 			return nil, fmt.Errorf("用户不存在: %v", err)
 		}
 		
 		// 返回虚拟会话对象
+		err = sm.db.QueryRow(`
+			SELECT id, user_id, token_hash, expires_at, created_at, last_accessed,
+			       ip_address, user_agent, is_active
+			FROM user_sessions
+			WHERE token_hash = ? AND user_id = ? AND is_active = TRUE AND expires_at > NOW()
+		`, tokenHash, userID).Scan(
+			&session.ID, &session.UserID, &session.TokenHash, &session.ExpiresAt,
+			&session.CreatedAt, &session.LastAccessed, &session.IPAddress,
+			&session.UserAgent, &session.IsActive,
+		)
+		if err == nil {
+			_ = sm.UpdateLastAccessed(session.ID)
+			return &session, nil
+		}
+		if err != sql.ErrNoRows {
+			return nil, fmt.Errorf("validate session failed: %v", err)
+		}
+
 		return &Session{
 			ID:           fmt.Sprintf("jwt_%s", claims.Subject),
 			UserID:       userID,
-			TokenHash:    hashToken(token),
+			TokenHash:    tokenHash,
 			ExpiresAt:    claims.ExpiresAt.Time,
 			CreatedAt:    claims.IssuedAt.Time,
 			LastAccessed: time.Now(),

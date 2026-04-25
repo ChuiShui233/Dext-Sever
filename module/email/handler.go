@@ -4,7 +4,6 @@ import (
 	"Dext-Server/config"
 	"Dext-Server/utils"
 	"database/sql"
-	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -44,8 +43,7 @@ func SendVerificationCodeHandler(c *gin.Context) {
 
 	// 验证图形验证码
 	if !utils.Verify(req.CaptchaId, req.CaptchaValue) {
-		utils.LogError("验证码验证失败", fmt.Errorf("captchaId: %s, captchaValue: %s", req.CaptchaId, req.CaptchaValue))
-		utils.SendError(c, http.StatusBadRequest, "验证码错误")
+		utils.UserError(c, "验证码错误")
 		return
 	}
 
@@ -140,8 +138,7 @@ func SendChangeEmailCodeHandler(c *gin.Context) {
 	// 如果提供了图形验证码，则验证
 	if req.CaptchaId != "" && req.CaptchaValue != "" {
 		if !utils.Verify(req.CaptchaId, req.CaptchaValue) {
-			utils.LogError("验证码验证失败", fmt.Errorf("captchaId: %s, captchaValue: %s", req.CaptchaId, req.CaptchaValue))
-			utils.SendError(c, http.StatusBadRequest, "验证码错误")
+			utils.UserError(c, "验证码错误")
 			return
 		}
 	}

@@ -334,7 +334,7 @@ func (s *EmailService) buildEmailContent(code string, purpose VerificationPurpos
             <div class="code">%s</div>
             <p>验证码有效期为 <strong>10分钟</strong>，请尽快完成验证。</p>
             <div class="warning">
-                <strong>⚠️ 安全提示：</strong>如果这不是您本人的操作，说明您的账户可能存在安全风险，请立即登录并修改密码。
+                <strong>安全提示：</strong>如果这不是您本人的操作，说明您的账户可能存在安全风险，请立即登录并修改密码。
             </div>
         </div>
         <div class="footer">

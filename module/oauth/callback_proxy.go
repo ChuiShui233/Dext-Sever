@@ -11,10 +11,10 @@ import (
 
 // 平台回调配置
 var platformCallbacks = map[string]string{
-	"web":     "https://dext.wucode.xyz/oauth_callback.html",
+	"web":     "https://qs.chuishui.top/oauth_callback",
 	"desktop": "dext://oauth/callback",
-	"mobile":  "https://dext.wucode.xyz/oauth_callback.html",
-	"dev":     "http://localhost:3000/oauth_callback.html",
+	"mobile":  "https://qs.chuishui.top/oauth_callback",
+	"dev":     "http://localhost:3000/oauth_callback",
 }
 
 // OAuthCallbackProxy 处理OAuth回调并代理到不同平台

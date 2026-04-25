@@ -8,22 +8,29 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// SendError 支持可选 err 参数
-func SendError(c *gin.Context, code int, msg string, errs ...error) {
-	var err error
-	if len(errs) > 0 {
-		err = errs[0]
-	}
-
-	if err != nil {
-		LogError(msg, err) // 记录错误日志
-	} else {
-		LogError(msg, nil)
+// SendError 支持可选 err 参数和 skipLog 参数
+func SendError(c *gin.Context, code int, msg string, errs ...interface{}) {
+	if len(errs) > 0 && errs[0] != nil {
+		if err, ok := errs[0].(error); ok {
+			LogError(msg, err)
+		} else {
+			LogError(msg, nil)
+		}
 	}
 
 	c.JSON(code, gin.H{
 		"error":   msg,
 		"status":  code,
+		"success": false,
+	})
+	c.Abort()
+}
+
+// UserError 发送用户输入错误，不记录到服务器日志
+func UserError(c *gin.Context, msg string) {
+	c.JSON(http.StatusBadRequest, gin.H{
+		"error":   msg,
+		"status":  http.StatusBadRequest,
 		"success": false,
 	})
 	c.Abort()

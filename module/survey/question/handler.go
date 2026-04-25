@@ -2,6 +2,7 @@ package question
 
 import (
 	"Dext-Server/config"
+	"Dext-Server/env"
 	"Dext-Server/model"
 	"Dext-Server/utils"
 	"database/sql"
@@ -16,6 +17,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+func shouldLogEnv() bool {
+	return env.ShouldLog()
+}
 
 func GetSurveyQuestionsHandler(c *gin.Context) {
 
@@ -169,10 +174,14 @@ func GetSurveyQuestionsHandler(c *gin.Context) {
 			if destinationQuestionID.Valid {
 				if destID, err := strconv.Atoi(destinationQuestionID.String); err == nil {
 					opt.Destination = &destID
-					log.Printf("从数据库读取选项 %d 的 destination: %d", opt.ID, destID)
+					if shouldLogEnv() {
+						log.Printf("从数据库读取选项 %d 的 destination: %d", opt.ID, destID)
+					}
 				}
 			} else {
-				log.Printf("选项 %d 数据库中 destination_question_id 为 NULL", opt.ID)
+				if shouldLogEnv() {
+					log.Printf("选项 %d 数据库中 destination_question_id 为 NULL", opt.ID)
+				}
 			}
 			if customPlaceholder.Valid {
 				opt.CustomInputPlaceholder = customPlaceholder.String
@@ -347,15 +356,21 @@ func AddSurveyQuestionHandler(c *gin.Context) {
 		// 验证 destination 值的合法性
 		if opt.Destination != nil {
 			dest := *opt.Destination
-			log.Printf("选项 %d 的 destination 值: %d", opt.ID, dest)
+			if shouldLogEnv() {
+				log.Printf("选项 %d 的 destination 值: %d", opt.ID, dest)
+			}
 			if dest < -1 || dest > 500 {
 				tx.Rollback()
-				log.Printf("拒绝无效的跳转目标: %d", dest)
+				if shouldLogEnv() {
+					log.Printf("拒绝无效的跳转目标: %d", dest)
+				}
 				utils.SendError(c, http.StatusBadRequest, fmt.Sprintf("无效的跳转目标: %d", dest))
 				return
 			}
 		} else {
-			log.Printf("选项 %d 的 destination 为 null", opt.ID)
+			if shouldLogEnv() {
+				log.Printf("选项 %d 的 destination 为 null", opt.ID)
+			}
 		}
 
 		_, err = tx.Exec(`
@@ -458,15 +473,21 @@ func UpdateSurveyQuestionHandler(c *gin.Context) {
 		// 验证 destination 值的合法性
 		if opt.Destination != nil {
 			dest := *opt.Destination
-			log.Printf("更新选项 %d 的 destination 值: %d", opt.ID, dest)
+			if shouldLogEnv() {
+				log.Printf("更新选项 %d 的 destination 值: %d", opt.ID, dest)
+			}
 			if dest < -1 || dest > 500 {
 				tx.Rollback()
-				log.Printf("拒绝无效的跳转目标: %d", dest)
+				if shouldLogEnv() {
+					log.Printf("拒绝无效的跳转目标: %d", dest)
+				}
 				utils.SendError(c, http.StatusBadRequest, fmt.Sprintf("无效的跳转目标: %d", dest))
 				return
 			}
 		} else {
-			log.Printf("更新选项 %d 的 destination 为 null", opt.ID)
+			if shouldLogEnv() {
+				log.Printf("更新选项 %d 的 destination 为 null", opt.ID)
+			}
 		}
 
 		_, err = tx.Exec(`

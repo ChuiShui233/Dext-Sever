@@ -236,7 +236,7 @@ func RegisterHandler(c *gin.Context) {
 		return
 	}
 	if !utils.Verify(req.CaptchaId, req.CaptchaValue) {
-		utils.SendError(c, http.StatusBadRequest, "验证码错误", nil)
+		utils.UserError(c, "验证码错误")
 		return
 	}
 
@@ -434,7 +434,7 @@ func LoginHandler(c *gin.Context) {
 		return
 	}
 	if !utils.Verify(req.CaptchaId, req.CaptchaValue) {
-		utils.SendError(c, http.StatusBadRequest, "验证码错误", nil)
+		utils.UserError(c, "验证码错误")
 		return
 	}
 
@@ -1196,14 +1196,6 @@ func UpdateUsernameHandler(c *gin.Context) {
 		req.NewUsername, currentUsername)
 	if err != nil {
 		utils.SendError(c, http.StatusInternalServerError, "更新问卷资源关联失败", err)
-		return
-	}
-
-	// 更新user_images表中的owner字段
-	_, err = tx.Exec("UPDATE user_images SET owner = ? WHERE owner = ?",
-		req.NewUsername, currentUsername)
-	if err != nil {
-		utils.SendError(c, http.StatusInternalServerError, "更新用户图片关联失败", err)
 		return
 	}
 

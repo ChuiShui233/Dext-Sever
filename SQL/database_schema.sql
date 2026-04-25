@@ -180,23 +180,7 @@ CREATE TABLE IF NOT EXISTS survey_assets_files (
     FOREIGN KEY (survey_id) REFERENCES surveys(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- User images table
-CREATE TABLE IF NOT EXISTS user_images (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
-    owner VARCHAR(50) NOT NULL COMMENT 'Image owner username',
-    image_name VARCHAR(255) NOT NULL COMMENT 'Image filename',
-    image_url TEXT NOT NULL COMMENT 'Image access URL',
-    image_size BIGINT NOT NULL COMMENT 'Image file size in bytes',
-    content_type VARCHAR(100) NOT NULL COMMENT 'Image MIME type',
-    upload_time DATETIME NOT NULL COMMENT 'Upload time',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation time',
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update time',
-    public_id VARCHAR(255) UNIQUE NOT NULL,
-    
-    INDEX idx_owner (owner),
-    INDEX idx_upload_time (upload_time),
-    INDEX idx_owner_upload_time (owner, upload_time)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='User images table';
+
 
 -- Create additional indexes
 CREATE UNIQUE INDEX idx_survey_uid ON surveys(survey_uid);
@@ -222,7 +206,7 @@ ALTER TABLE survey_stats COMMENT = 'Survey statistics table - Store survey acces
 ALTER TABLE survey_views COMMENT = 'Survey views table - Record survey access information';
 ALTER TABLE survey_submissions COMMENT = 'Survey submissions table - Record survey submission information';
 ALTER TABLE survey_assets_files COMMENT = 'Survey assets files table - Store survey related assets files';
-ALTER TABLE user_images COMMENT = 'User images table - Store user uploaded image file information';
+
 
 -- Insert default admin user (optional)
 -- INSERT INTO users (id, username, password_hash, user_role) VALUES 

@@ -13,7 +13,7 @@ require (
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/disintegration/imaging v1.6.2
 	github.com/golang/freetype v0.0.0-20170609003504-e2365dfdc4a0 // indirect
-	golang.org/x/image v0.23.0
+	golang.org/x/image v0.24.0
 )
 
 require github.com/google/uuid v1.6.0
@@ -56,4 +56,7 @@ require (
 	github.com/resend/resend-go/v2 v2.11.0
 )
 
-require github.com/robfig/cron/v3 v3.0.1
+require (
+	github.com/robfig/cron/v3 v3.0.1
+	golang.org/x/sync v0.15.0
+)

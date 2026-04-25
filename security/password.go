@@ -5,7 +5,9 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
+	"os"
 	"strings"
+	"sync"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -150,11 +152,20 @@ func parseEncodedHash(encodedHash string) (*PasswordConfig, []byte, []byte, erro
 	return config, salt, hash, nil
 }
 
-// GetPepper 获取pepper值（从环境变量或配置文件）
+var (
+	pepperOnce   sync.Once
+	cachedPepper string
+)
+
+// GetPepper 获取 pepper，要求通过环境变量 PASSWORD_PEPPER 注入
 func GetPepper() string {
-	// 这里应该从安全的地方获取pepper，比如环境变量或配置文件
-	// 为了演示，这里使用一个固定值，实际应用中应该使用随机生成的值
-	return "your-secret-pepper-key-change-this-in-production"
+	pepperOnce.Do(func() {
+		cachedPepper = strings.TrimSpace(os.Getenv("PASSWORD_PEPPER"))
+		if len(cachedPepper) < 16 {
+			panic("PASSWORD_PEPPER is required and must be at least 16 characters")
+		}
+	})
+	return cachedPepper
 }
 
 // IsArgon2Hash 检查是否为Argon2哈希

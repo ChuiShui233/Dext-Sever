@@ -1,6 +1,7 @@
 package security
 
 import (
+	"Dext-Server/env"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
@@ -213,25 +214,29 @@ func DecryptXChaChaRequest(encryptedPayload map[string]interface{}) ([]byte, []b
 	}
 
 	// 添加调试信息
-	log.Printf("解密请求: sessionKey长度=%d, packet长度=%d, remoteEphemeralKey长度=%d", 
-		len(sessionKey), len(encryptedPacket), len(remoteEphemeralKey))
-	log.Printf("服务器私钥前8字节: %x", serverKeyPair.PrivateKey[:min(8, len(serverKeyPair.PrivateKey))])
-	log.Printf("服务器公钥前8字节: %x", serverKeyPair.PublicKey[:min(8, len(serverKeyPair.PublicKey))])
-	log.Printf("客户端临时公钥前8字节: %x", remoteEphemeralKey[:min(8, len(remoteEphemeralKey))])
-	if len(sessionKey) > 0 {
-		log.Printf("派生出的sessionKey前8字节: %x", sessionKey[:min(8, len(sessionKey))])
-	}
-	if len(encryptedPacket) >= 24 {
-		log.Printf("packet前24字节(nonce): %x", encryptedPacket[:24])
+	if env.ShouldLog() {
+		log.Printf("解密请求: sessionKey长度=%d, packet长度=%d, remoteEphemeralKey长度=%d",
+			len(sessionKey), len(encryptedPacket), len(remoteEphemeralKey))
+		log.Printf("服务器私钥前8字节: %x", serverKeyPair.PrivateKey[:min(8, len(serverKeyPair.PrivateKey))])
+		log.Printf("服务器公钥前8字节: %x", serverKeyPair.PublicKey[:min(8, len(serverKeyPair.PublicKey))])
+		log.Printf("客户端临时公钥前8字节: %x", remoteEphemeralKey[:min(8, len(remoteEphemeralKey))])
+		if len(sessionKey) > 0 {
+			log.Printf("派生出的sessionKey前8字节: %x", sessionKey[:min(8, len(sessionKey))])
+		}
+		if len(encryptedPacket) >= 24 {
+			log.Printf("packet前24字节(nonce): %x", encryptedPacket[:24])
+		}
 	}
 
 	// 解密数据包
 	plaintext, err := DecryptPacket(sessionKey, encryptedPacket)
 	if err != nil {
-		log.Printf("解密失败详情: sessionKey长度=%d, packet长度=%d, 错误=%v", len(sessionKey), len(encryptedPacket), err)
-		// 打印数据包的前几个字节用于调试
-		if len(encryptedPacket) > 0 {
-			log.Printf("数据包前32字节: %x", encryptedPacket[:min(32, len(encryptedPacket))])
+		if env.ShouldLog() {
+			log.Printf("解密失败详情: sessionKey长度=%d, packet长度=%d, 错误=%v", len(sessionKey), len(encryptedPacket), err)
+			// 打印数据包的前几个字节用于调试
+			if len(encryptedPacket) > 0 {
+				log.Printf("数据包前32字节: %x", encryptedPacket[:min(32, len(encryptedPacket))])
+			}
 		}
 		return nil, nil, fmt.Errorf("解密数据包失败: %v", err)
 	}
@@ -269,4 +274,3 @@ func EncryptXChaChaResponse(plaintext []byte, clientEphemeralPublicKey []byte) (
 		"packet":             base64.StdEncoding.EncodeToString(encryptedPacket),
 	}, nil
 }
-

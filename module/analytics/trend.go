@@ -2,6 +2,7 @@ package analytics
 
 import (
 	"Dext-Server/config"
+	"Dext-Server/env"
 	"Dext-Server/utils"
 	"database/sql"
 	"fmt"
@@ -10,6 +11,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+func shouldAnalyticsLog() bool {
+	return env.ShouldLog()
+}
 
 // 概览：当前用户所有问卷的总浏览数、总提交数、总问卷数、活跃问卷数（发布中）
 func GetOverviewHandler(c *gin.Context) {
@@ -105,8 +110,9 @@ func GetSubmitTrendHandler(c *gin.Context) {
       GROUP BY d
       ORDER BY d ASC`, username)
 
-		// 调试日志：打印查询条件和结果
-		fmt.Printf("7日趋势查询 - 用户: %s, 时间范围: >= %s\n", username, time.Now().AddDate(0, 0, -6).Format("2006-01-02"))
+		if shouldAnalyticsLog() {
+			fmt.Printf("7日趋势查询 - 用户: %s, 时间范围: >= %s\n", username, time.Now().AddDate(0, 0, -6).Format("2006-01-02"))
+		}
 		if err != nil {
 			utils.SendError(c, http.StatusInternalServerError, "获取趋势失败", err)
 			return

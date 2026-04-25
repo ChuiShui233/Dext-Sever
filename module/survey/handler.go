@@ -2,6 +2,7 @@ package survey
 
 import (
 	"Dext-Server/config"
+	"Dext-Server/env"
 	"Dext-Server/model"
 	"Dext-Server/utils"
 	"crypto/sha256"
@@ -17,6 +18,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+func shouldSurveyLog() bool {
+	return env.ShouldLog()
+}
 
 // GET /api/survey/surveys?query=&type=&page=1&pageSize=10
 // 获取问卷列表，支持按问卷名称模糊搜索、问卷类型过滤，分页
@@ -43,7 +48,7 @@ func GetSurveysHandler(c *gin.Context) {
 		}
 	}
 	whereSQL := strings.Join(where, " AND ")
-	
+
 	// 如果没有分页参数，返回全部数据
 	if pageStr == "" && pageSizeStr == "" {
 		// 不分页，获取全部数据
@@ -56,7 +61,7 @@ func GetSurveysHandler(c *gin.Context) {
 			WHERE ` + whereSQL + `
 			ORDER BY s.create_time DESC
 		`
-		
+
 		rows, err := db.Query(listSQL, args...)
 		if err != nil {
 			utils.SendError(c, http.StatusInternalServerError, "获取问卷列表失败", err)
@@ -87,7 +92,7 @@ func GetSurveysHandler(c *gin.Context) {
 		c.JSON(http.StatusOK, surveys)
 		return
 	}
-	
+
 	// 有分页参数，执行分页逻辑
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "10"))
@@ -471,7 +476,9 @@ func GetSurveyByIDHandler(c *gin.Context) {
 			&survey.CreateTime, &survey.UpdateTime)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			log.Printf("拒绝连接: 访问不存在的问卷 %s", id)
+			if shouldSurveyLog() {
+				log.Printf("拒绝连接: 访问不存在的问卷 %s", id)
+			}
 			c.AbortWithStatus(http.StatusNotFound)
 		} else {
 			utils.SendError(c, http.StatusInternalServerError, "获取问卷失败", err)
@@ -571,7 +578,9 @@ func GetPublicSurveyHandler(c *gin.Context) {
 
 	if err != nil {
 		if err == sql.ErrNoRows {
-			log.Printf("拒绝连接: 访问不存在或未发布的问卷")
+			if shouldSurveyLog() {
+				log.Printf("拒绝连接: 访问不存在或未发布的问卷")
+			}
 			c.AbortWithStatus(http.StatusNotFound)
 		} else {
 			utils.SendError(c, http.StatusInternalServerError, "获取问卷失败")
@@ -677,7 +686,9 @@ func GetPublicSurveyHandler(c *gin.Context) {
 		var jumpLogic map[int]int
 		if jumpLogicStr.Valid && jumpLogicStr.String != "" {
 			if err := json.Unmarshal([]byte(jumpLogicStr.String), &jumpLogic); err != nil {
-				log.Printf("公开问卷API: 解析问题 %d 的 jumpLogic 失败: %v", id, err)
+				if shouldSurveyLog() {
+					log.Printf("公开问卷API: 解析问题 %d 的 jumpLogic 失败: %v", id, err)
+				}
 				jumpLogic = map[int]int{}
 			} else {
 				// 验证 jumpLogic 中的选项 ID 是否存在于当前选项中
@@ -688,12 +699,14 @@ func GetPublicSurveyHandler(c *gin.Context) {
 						optionIDs[optID] = true
 					}
 				}
-				
+
 				for optionID, targetID := range jumpLogic {
 					if optionIDs[optionID] {
 						validJumpLogic[optionID] = targetID
 					} else {
-						log.Printf("公开问卷API: 问题 %d 的 jumpLogic 包含无效选项ID %d，已忽略", id, optionID)
+						if shouldSurveyLog() {
+							log.Printf("公开问卷API: 问题 %d 的 jumpLogic 包含无效选项ID %d，已忽略", id, optionID)
+						}
 					}
 				}
 				jumpLogic = validJumpLogic
@@ -704,18 +717,26 @@ func GetPublicSurveyHandler(c *gin.Context) {
 
 		// 如果 jumpLogic 为空（包括过滤后为空），从选项的 destination 字段构建跳转逻辑
 		if len(jumpLogic) == 0 {
-			log.Printf("公开问卷API: 问题 %d 的 jumpLogic 为空，尝试从选项 destination 构建", id)
+			if shouldSurveyLog() {
+				log.Printf("公开问卷API: 问题 %d 的 jumpLogic 为空，尝试从选项 destination 构建", id)
+			}
 			for _, opt := range options {
 				if optID, ok := opt["id"].(int); ok {
 					if dest, exists := opt["destination"]; exists && dest != nil {
 						if destID, ok := dest.(int); ok && destID != 0 {
 							jumpLogic[optID] = destID
-							log.Printf("公开问卷API: 从选项 %d 的 destination 构建跳转逻辑: %d", optID, destID)
+							if shouldSurveyLog() {
+								log.Printf("公开问卷API: 从选项 %d 的 destination 构建跳转逻辑: %d", optID, destID)
+							}
 						} else {
-							log.Printf("公开问卷API: 选项 %d 的 destination 为 0 或无效，跳过", optID)
+							if shouldSurveyLog() {
+								log.Printf("公开问卷API: 选项 %d 的 destination 为 0 或无效，跳过", optID)
+							}
 						}
 					} else {
-						log.Printf("公开问卷API: 选项 %d 没有 destination 字段或为 null", optID)
+						if shouldSurveyLog() {
+							log.Printf("公开问卷API: 选项 %d 没有 destination 字段或为 null", optID)
+						}
 					}
 				}
 			}
@@ -811,7 +832,7 @@ func SubmitPublicAnswerHandler(c *gin.Context) {
 	// 获取用户ID，支持匿名提交
 	var userID string
 	var username string
-	
+
 	// 检查是否有登录用户
 	if userIDInterface, exists := c.Get("user_id"); exists && userIDInterface != nil {
 		userID = userIDInterface.(string)
@@ -819,64 +840,64 @@ func SubmitPublicAnswerHandler(c *gin.Context) {
 			username = usernameInterface.(string)
 		}
 	}
-	
+
 	// 如果没有登录用户但允许匿名提交，生成匿名用户ID
 	if userID == "" {
 		if !allowAnonymous {
 			utils.SendError(c, http.StatusUnauthorized, "需要登录才能提交问卷")
 			return
 		}
-		    // 生成稳定匿名ID（受配置控制：ANON_ID_MODE, ANON_INCLUDE_PORT, TRUST_PROXY, ANON_ID_SALT）
-    mode := config.GetAnonIDMode()       // off | normal | strict
-    includePort := config.AnonIncludePort()
-    trustProxy := config.TrustProxy()
-    salt := config.GetAnonIDSalt()
+		// 生成稳定匿名ID（受配置控制：ANON_ID_MODE, ANON_INCLUDE_PORT, TRUST_PROXY, ANON_ID_SALT）
+		mode := config.GetAnonIDMode() // off | normal | strict
+		includePort := config.AnonIncludePort()
+		trustProxy := config.TrustProxy()
+		salt := config.GetAnonIDSalt()
 
-    // 取真实IP
-    realIP := c.ClientIP()
-    if trustProxy {
-      if xff := c.Request.Header.Get("X-Forwarded-For"); xff != "" {
-        // 取链首IP
-        parts := strings.Split(xff, ",")
-        if len(parts) > 0 {
-          ip := strings.TrimSpace(parts[0])
-          if ip != "" {
-            realIP = ip
-          }
-        }
-      }
-    }
+		// 取真实IP
+		realIP := c.ClientIP()
+		if trustProxy {
+			if xff := c.Request.Header.Get("X-Forwarded-For"); xff != "" {
+				// 取链首IP
+				parts := strings.Split(xff, ",")
+				if len(parts) > 0 {
+					ip := strings.TrimSpace(parts[0])
+					if ip != "" {
+						realIP = ip
+					}
+				}
+			}
+		}
 
-    // 可选端口
-    port := ""
-    if includePort {
-      if hostPort := c.Request.RemoteAddr; hostPort != "" {
-        // 形如 1.2.3.4:56789
-        if idx := strings.LastIndex(hostPort, ":"); idx > 0 && idx < len(hostPort)-1 {
-          port = hostPort[idx+1:]
-        }
-      }
-    }
+		// 可选端口
+		port := ""
+		if includePort {
+			if hostPort := c.Request.RemoteAddr; hostPort != "" {
+				// 形如 1.2.3.4:56789
+				if idx := strings.LastIndex(hostPort, ":"); idx > 0 && idx < len(hostPort)-1 {
+					port = hostPort[idx+1:]
+				}
+			}
+		}
 
-    ua := c.GetHeader("User-Agent")
-    al := c.GetHeader("Accept-Language")
+		ua := c.GetHeader("User-Agent")
+		al := c.GetHeader("Accept-Language")
 
-    var raw string
-    switch mode {
-    case "off":
-      // 仅IP（可能多人共用同一ID）
-      raw = fmt.Sprintf("IP=%s|S=%s|Z=%s", realIP, surveyUID, salt)
-    case "strict":
-      // 更严格：IP + UA + Accept-Language + surveyUID + 可选端口 + salt
-      raw = fmt.Sprintf("IP=%s|UA=%s|AL=%s|S=%s|P=%s|Z=%s", realIP, ua, al, surveyUID, port, salt)
-    default: // normal
-      // 折中：IP + UA + surveyUID + salt
-      raw = fmt.Sprintf("IP=%s|UA=%s|S=%s|Z=%s", realIP, ua, surveyUID, salt)
-    }
+		var raw string
+		switch mode {
+		case "off":
+			// 仅IP（可能多人共用同一ID）
+			raw = fmt.Sprintf("IP=%s|S=%s|Z=%s", realIP, surveyUID, salt)
+		case "strict":
+			// 更严格：IP + UA + Accept-Language + surveyUID + 可选端口 + salt
+			raw = fmt.Sprintf("IP=%s|UA=%s|AL=%s|S=%s|P=%s|Z=%s", realIP, ua, al, surveyUID, port, salt)
+		default: // normal
+			// 折中：IP + UA + surveyUID + salt
+			raw = fmt.Sprintf("IP=%s|UA=%s|S=%s|Z=%s", realIP, ua, surveyUID, salt)
+		}
 
-    sum := sha256.Sum256([]byte(raw))
-    userID = "anonymous_" + hex.EncodeToString(sum[:8])
-    username = "匿名用户"
+		sum := sha256.Sum256([]byte(raw))
+		userID = "anonymous_" + hex.EncodeToString(sum[:8])
+		username = "匿名用户"
 	}
 
 	// 用户维度提交次数
@@ -982,7 +1003,7 @@ func SubmitPublicAnswerHandler(c *gin.Context) {
 				}
 			}
 		}
-		
+
 		var indices []int
 		texts := make([]string, 0, len(answer.Answer))
 		if len(answer.Indices) > 0 {
@@ -991,7 +1012,7 @@ func SubmitPublicAnswerHandler(c *gin.Context) {
 				if idx >= 0 && idx < len(optTexts) && !seen[idx] {
 					seen[idx] = true
 					indices = append(indices, idx)
-					
+
 					// 如果是自定义填写选项且有用户输入，使用完整内容
 					if optTexts[idx] == "__custom_input__" {
 						if customText, exists := customInputMap[idx]; exists {

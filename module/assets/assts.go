@@ -1,6 +1,7 @@
 package assets
 
 import (
+	"Dext-Server/env"
 	"Dext-Server/security"
 	"Dext-Server/utils"
 	"crypto/md5"
@@ -22,6 +23,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"golang.org/x/sync/singleflight"
 )
 
 // Config 用于配置 OpenAssets 服务。
@@ -44,8 +46,9 @@ type FileMetadata struct {
 	MD5Hash      string    `json:"md5Hash"`
 	UploadTime   time.Time `json:"uploadTime"`
 	Bucket       string    `json:"bucket"`
+	PublicName   string    `json:"publicName"`
 	URL          string    `json:"url"`
-	Owner        string    `json:"owner"` // 文件所有者（用户名）
+	Owner        string    `json:"owner"`
 }
 
 // UserStorage 跟踪单个用户的存储使用情况。
@@ -59,19 +62,347 @@ type UserStorage struct {
 type Service struct {
 	config      *Config
 	db          *sql.DB                  // 用于用户验证的数据库连接
+	assetsDB    *sql.DB                  // assets 文件元数据数据库连接
 	fileStore   map[string]*FileMetadata // 文件元数据的内存存储
+	nameIndex   map[string]*FileMetadata // 文件名索引: bucket/publicName -> metadata
 	userStorage map[string]*UserStorage  // 用户存储统计的内存存储
 	mutex       sync.RWMutex
+	sfGroup     singleflight.Group
+}
+
+func isProduction() bool {
+	return env.IsProduction()
+}
+
+func shouldLog() bool {
+	return env.ShouldLog()
 }
 
 // NewService 创建并初始化一个新的 OpenAssets 服务实例。
+func isSafeBucketName(bucket string) bool {
+	if bucket == "" || len(bucket) > 64 {
+		return false
+	}
+	for _, r := range bucket {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isSafeFileName(name string) bool {
+	if name == "" || len(name) > 255 {
+		return false
+	}
+	if strings.Contains(name, "..") || strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		return false
+	}
+	return filepath.Base(name) == name
+}
+
+func stripExtension(name string) string {
+	ext := filepath.Ext(name)
+	return strings.TrimSuffix(name, ext)
+}
+
+func stripQualitySuffix(name string) string {
+	name = stripExtension(name)
+	for _, suffix := range []string{"_thumb", "_medium", "_original"} {
+		name = strings.TrimSuffix(name, suffix)
+	}
+	return name
+}
+
+func (s *Service) resolveStoragePath(bucket, filename string) (string, error) {
+	if !isSafeBucketName(bucket) {
+		return "", fmt.Errorf("invalid bucket")
+	}
+	if !isSafeFileName(filename) {
+		return "", fmt.Errorf("invalid filename")
+	}
+
+	baseAbs, err := filepath.Abs(s.config.StoragePath)
+	if err != nil {
+		return "", fmt.Errorf("resolve storage path failed: %w", err)
+	}
+	targetAbs, err := filepath.Abs(filepath.Join(baseAbs, bucket, filename))
+	if err != nil {
+		return "", fmt.Errorf("resolve file path failed: %w", err)
+	}
+
+	prefix := baseAbs + string(os.PathSeparator)
+	if targetAbs != baseAbs && !strings.HasPrefix(targetAbs, prefix) {
+		return "", fmt.Errorf("path escapes storage root")
+	}
+	return targetAbs, nil
+}
+
+func (s *Service) rebuildIndex() error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	entries, err := os.ReadDir(s.config.StoragePath)
+	if err != nil {
+		return fmt.Errorf("读取存储目录失败: %w", err)
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		bucket := entry.Name()
+		if !isSafeBucketName(bucket) {
+			continue
+		}
+
+		bucketPath := filepath.Join(s.config.StoragePath, bucket)
+		files, err := os.ReadDir(bucketPath)
+		if err != nil {
+			if shouldLog() {
+				log.Printf("[OpenAssets] 警告: 读取桶 [%s] 失败: %v", bucket, err)
+			}
+			continue
+		}
+
+		for _, file := range files {
+			if file.IsDir() {
+				continue
+			}
+			filename := file.Name()
+			if !isSafeFileName(filename) {
+				continue
+			}
+
+			publicName := stripQualitySuffix(filename)
+			publicName = stripExtension(publicName)
+			indexKey := bucket + "/" + publicName
+
+			if _, exists := s.nameIndex[indexKey]; exists {
+				continue
+			}
+
+			info, err := file.Info()
+			if err != nil {
+				continue
+			}
+
+			contentType := utils.GetContentTypeByExtension(filename)
+			if contentType == "" {
+				contentType = "application/octet-stream"
+			}
+
+			metadata := &FileMetadata{
+				ID:           uuid.New().String(),
+				FileName:     filename,
+				OriginalName: filename,
+				FileSize:     info.Size(),
+				ContentType:  contentType,
+				UploadTime:   info.ModTime(),
+				Bucket:       bucket,
+				PublicName:   publicName,
+				URL:          fmt.Sprintf("/openassets/files/%s/%s", bucket, publicName),
+				Owner:        "unknown",
+			}
+			s.fileStore[metadata.ID] = metadata
+			s.nameIndex[indexKey] = metadata
+			if err := SaveFileToDB(s.assetsDB, metadata); err != nil {
+				if shouldLog() {
+					log.Printf("[OpenAssets] 警告: 保存文件 %s 到数据库失败: %v", filename, err)
+				}
+			}
+
+			compressedPath := filepath.Join(bucketPath, "compressed")
+			cfEntries, err := os.ReadDir(compressedPath)
+			if err != nil {
+				continue
+			}
+			for _, cf := range cfEntries {
+				if cf.IsDir() {
+					continue
+				}
+				cfName := cf.Name()
+				cfExt := strings.ToLower(filepath.Ext(cfName))
+				if cfExt != ".jpg" && cfExt != ".png" {
+					continue
+				}
+				cfBase := publicName + "_"
+				if !strings.HasPrefix(cfName, cfBase) {
+					continue
+				}
+				quality := strings.TrimSuffix(strings.TrimPrefix(stripExtension(cfName), publicName+"_"), cfExt)
+				if quality == cfName {
+					continue
+				}
+				cfInfo, _ := cf.Info()
+				cfile := &CompressedFile{
+					ID:                 uuid.New().String(),
+					Bucket:             bucket,
+					OriginalFileName:   filename,
+					CompressedFileName: cfName,
+					Quality:            quality,
+					FileSize:           cfInfo.Size(),
+					ContentType:        "image/" + strings.TrimPrefix(cfExt, "."),
+					OriginalID:         metadata.ID,
+				}
+				_ = SaveCompressedFile(s.assetsDB, cfile)
+			}
+		}
+	}
+
+	fileCount := len(s.fileStore)
+	if shouldLog() {
+		log.Printf("[OpenAssets] 信息: 索引重建完成，共加载 %d 个文件", fileCount)
+	}
+	return nil
+}
+
+func (s *Service) loadFromDB() error {
+	if s.assetsDB == nil {
+		return fmt.Errorf("数据库连接未初始化")
+	}
+
+	rows, err := s.assetsDB.Query(`
+		SELECT id, file_name, original_name, file_size, content_type, md5_hash, upload_time, bucket, public_name, owner, url
+		FROM assets_files`)
+	if err != nil {
+		return fmt.Errorf("查询数据库失败: %w", err)
+	}
+	defer rows.Close()
+
+	count := 0
+	for rows.Next() {
+		m, err := ScanFileMetadata(rows)
+		if err != nil {
+			continue
+		}
+		s.fileStore[m.ID] = m
+		s.nameIndex[m.Bucket+"/"+m.PublicName] = m
+		count++
+	}
+
+	diskCount := s.countDiskFiles()
+	if count > 0 && count != diskCount {
+		if shouldLog() {
+			log.Printf("[OpenAssets] 警告: 数据库记录数(%d)与磁盘文件数(%d)不匹配，清空数据库并重新导入", count, diskCount)
+		}
+		_, _ = s.assetsDB.Exec("TRUNCATE TABLE assets_files")
+		s.fileStore = make(map[string]*FileMetadata)
+		s.nameIndex = make(map[string]*FileMetadata)
+		return fmt.Errorf("数据库与磁盘不一致，需要重新导入")
+	}
+
+	if shouldLog() {
+		log.Printf("[OpenAssets] 信息: 从数据库加载 %d 条文件记录", count)
+	}
+	if count == 0 {
+		return fmt.Errorf("数据库为空，需要从磁盘导入")
+	}
+
+	s.loadCompressedIndex()
+	return nil
+}
+
+func (s *Service) loadCompressedIndex() {
+	entries, err := os.ReadDir(s.config.StoragePath)
+	if err != nil {
+		return
+	}
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		bucket := entry.Name()
+		if !isSafeBucketName(bucket) {
+			continue
+		}
+		compressedPath := filepath.Join(s.config.StoragePath, bucket, "compressed")
+		cfEntries, err := os.ReadDir(compressedPath)
+		if err != nil {
+			continue
+		}
+		for _, cf := range cfEntries {
+			if cf.IsDir() {
+				continue
+			}
+			cfName := cf.Name()
+			ext := strings.ToLower(filepath.Ext(cfName))
+			if ext != ".jpg" && ext != ".png" {
+				continue
+			}
+			base := stripExtension(cfName)
+			parts := strings.SplitN(base, "_", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			publicName := parts[0]
+			quality := parts[1]
+			indexKey := bucket + "/" + publicName
+			meta, ok := s.nameIndex[indexKey]
+			cfInfo, _ := cf.Info()
+			cfile := &CompressedFile{
+				ID:                 uuid.New().String(),
+				Bucket:             bucket,
+				OriginalFileName:   "",
+				CompressedFileName: cfName,
+				Quality:            quality,
+				FileSize:           cfInfo.Size(),
+				ContentType:        "image/" + strings.TrimPrefix(ext, "."),
+				OriginalID:         "",
+			}
+			if ok {
+				cfile.OriginalID = meta.ID
+				cfile.OriginalFileName = meta.FileName
+			}
+			if err := SaveCompressedFile(s.assetsDB, cfile); err != nil {
+				if shouldLog() {
+					log.Printf("[OpenAssets] 警告: 保存压缩图索引失败: %v", err)
+				}
+			}
+			count++
+		}
+	}
+	if shouldLog() {
+		log.Printf("[OpenAssets] 信息: 加载 %d 个压缩图索引", count)
+	}
+}
+
+func (s *Service) countDiskFiles() int {
+	count := 0
+	entries, err := os.ReadDir(s.config.StoragePath)
+	if err != nil {
+		return 0
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		bucket := entry.Name()
+		if !isSafeBucketName(bucket) {
+			continue
+		}
+		bucketPath := filepath.Join(s.config.StoragePath, bucket)
+		files, err := os.ReadDir(bucketPath)
+		if err != nil {
+			continue
+		}
+		for _, f := range files {
+			if !f.IsDir() {
+				count++
+			}
+		}
+	}
+	return count
+}
+
 func NewService(config *Config, db *sql.DB) (*Service, error) {
 	if config.StoragePath == "" {
 		return nil, fmt.Errorf("StoragePath 不能为空")
 	}
-	if config.BaseURL == "" {
-		log.Printf("[OpenAssets] 提示: BaseURL 未设置，将返回相对路径URL，避免域名变更导致死链")
-	}
+	// BaseURL is no longer used; all URLs are generated as relative paths
+	// to avoid broken links when domain changes
 	if db == nil {
 		return nil, fmt.Errorf("数据库连接不能为空")
 	}
@@ -80,10 +411,12 @@ func NewService(config *Config, db *sql.DB) (*Service, error) {
 		log.Printf("[OpenAssets] 错误: 创建存储目录失败: %v", err)
 		return nil, fmt.Errorf("创建存储目录失败: %w", err)
 	}
-	log.Printf("[OpenAssets] 信息: 存储目录已就绪: %s", config.StoragePath)
+	if shouldLog() {
+		log.Printf("[OpenAssets] 信息: 存储目录已就绪: %s", config.StoragePath)
+	}
 
 	// 预先创建一些通用的桶
-	buckets := []string{"survey-assets", "images", "videos", "audio"}
+	buckets := []string{"survey-assets", "images", "videos"}
 	for _, bucket := range buckets {
 		bucketPath := filepath.Join(config.StoragePath, bucket)
 		if err := os.MkdirAll(bucketPath, 0755); err != nil {
@@ -95,12 +428,25 @@ func NewService(config *Config, db *sql.DB) (*Service, error) {
 	service := &Service{
 		config:      config,
 		db:          db,
+		assetsDB:    db,
 		fileStore:   make(map[string]*FileMetadata),
+		nameIndex:   make(map[string]*FileMetadata),
 		userStorage: make(map[string]*UserStorage),
 	}
 
+	if err := RunMigrations(db); err != nil {
+		log.Printf("[OpenAssets] 错误: 数据库迁移失败: %v", err)
+		return nil, fmt.Errorf("数据库迁移失败: %w", err)
+	}
+
+	if err := service.loadFromDB(); err != nil {
+		log.Printf("[OpenAssets] 警告: 从数据库加载失败: %v，将使用冷启动索引", err)
+		if err := service.rebuildIndex(); err != nil {
+			log.Printf("[OpenAssets] 警告: 索引重建也失败: %v", err)
+		}
+	}
+
 	log.Println("[OpenAssets] 信息: OpenAssets 服务初始化成功。")
-	// 注意：在实际应用中，您可能希望在此处从持久化存储（如数据库或文件）加载现有的文件元数据。
 	return service, nil
 }
 
@@ -231,7 +577,9 @@ func (s *Service) updateUserStorage(username string, fileSize int64, isAdd bool)
 	if !exists {
 		if isAdd {
 			s.userStorage[username] = &UserStorage{Username: username, UsedSize: fileSize, FileCount: 1}
-			log.Printf("[OpenAssets] 信息: 为新用户 [%s] 创建了存储统计。已使用: %d 字节", username, fileSize)
+			if shouldLog() {
+				log.Printf("[OpenAssets] 信息: 为新用户 [%s] 创建了存储统计。已使用: %d 字节", username, fileSize)
+			}
 		}
 		return
 	}
@@ -264,7 +612,10 @@ func (s *Service) UploadFile(bucket, filename, originalName, contentType, owner 
 		return nil, err
 	}
 
-	filePath := filepath.Join(s.config.StoragePath, bucket, filename)
+	filePath, err := s.resolveStoragePath(bucket, filename)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
 		return nil, fmt.Errorf("创建桶目录失败: %w", err)
 	}
@@ -287,8 +638,10 @@ func (s *Service) UploadFile(bucket, filename, originalName, contentType, owner 
 
 	fileID := uuid.New().String()
 
-	// 统一使用相对路径，避免硬编码域名
-	relURL := fmt.Sprintf("/openassets/files/%s/%s", bucket, filename)
+	publicName := stripQualitySuffix(filename)
+	publicName = stripExtension(publicName)
+
+	relURL := fmt.Sprintf("/openassets/files/%s/%s", bucket, publicName)
 	metadata := &FileMetadata{
 		ID:           fileID,
 		FileName:     filename,
@@ -298,22 +651,35 @@ func (s *Service) UploadFile(bucket, filename, originalName, contentType, owner 
 		MD5Hash:      md5Hash,
 		UploadTime:   time.Now(),
 		Bucket:       bucket,
+		PublicName:   publicName,
 		URL:          relURL,
 		Owner:        owner,
 	}
 
+	if err := SaveFileToDB(s.assetsDB, metadata); err != nil {
+		if shouldLog() {
+			log.Printf("[OpenAssets] 警告: 保存文件元数据到数据库失败: %v", err)
+		}
+	}
+
 	s.mutex.Lock()
 	s.fileStore[fileID] = metadata
+	s.nameIndex[bucket+"/"+publicName] = metadata
 	s.mutex.Unlock()
 	s.updateUserStorage(owner, written, true)
 
-	log.Printf("[OpenAssets] 信息: 文件上传成功。所有者: %s, 路径: %s/%s, 大小: %d", owner, bucket, filename, written)
+	if shouldLog() {
+		log.Printf("[OpenAssets] 信息: 文件上传成功。所有者: %s, 路径: %s/%s, 大小: %d", owner, bucket, filename, written)
+	}
 	return metadata, nil
 }
 
 // DeleteFile 是用于删除文件的核心服务逻辑。
 func (s *Service) DeleteFile(bucket, filename, owner string) error {
-	filePath := filepath.Join(s.config.StoragePath, bucket, filename)
+	filePath, err := s.resolveStoragePath(bucket, filename)
+	if err != nil {
+		return err
+	}
 	fileInfo, err := os.Stat(filePath)
 	if os.IsNotExist(err) {
 		return fmt.Errorf("文件未找到")
@@ -322,32 +688,44 @@ func (s *Service) DeleteFile(bucket, filename, owner string) error {
 		return fmt.Errorf("获取文件信息失败: %w", err)
 	}
 
-	// 先删除物理文件
 	if err := os.Remove(filePath); err != nil {
 		return fmt.Errorf("删除物理文件失败: %w", err)
 	}
 
-	// 然后更新内存数据（使用锁保护）
+	compressedDir := filepath.Join(s.config.StoragePath, bucket, "compressed")
+	compressedBase := stripExtension(filename)
+	compressedFiles, _ := filepath.Glob(filepath.Join(compressedDir, compressedBase+"_*"))
+	for _, f := range compressedFiles {
+		os.Remove(f)
+	}
+
 	s.mutex.Lock()
 	var fileIDToDelete string
-	found := false
+	var publicName string
 	for id, metadata := range s.fileStore {
 		if metadata.FileName == filename && metadata.Bucket == bucket && metadata.Owner == owner {
-			found = true
 			fileIDToDelete = id
+			publicName = stripQualitySuffix(metadata.FileName)
+			publicName = stripExtension(publicName)
 			break
 		}
 	}
 
-	if !found {
-		log.Printf("[OpenAssets] 警告: 正在为用户 [%s] 删除文件 [%s/%s]，但没有匹配的内存元数据记录。", owner, bucket, filename)
-	}
-
 	if fileIDToDelete != "" {
 		delete(s.fileStore, fileIDToDelete)
+		delete(s.nameIndex, bucket+"/"+publicName)
+		if err := DeleteFileFromDB(s.assetsDB, bucket, publicName); err != nil {
+			if shouldLog() {
+				log.Printf("[OpenAssets] 警告: 从数据库删除文件记录失败: %v", err)
+			}
+		}
+		if err := DeleteCompressedFilesByOriginal(s.assetsDB, filename); err != nil {
+			if shouldLog() {
+				log.Printf("[OpenAssets] 警告: 从数据库删除压缩图记录失败: %v", err)
+			}
+		}
 	}
 
-	// 直接在锁内更新用户存储，避免嵌套锁调用
 	userStorage, exists := s.userStorage[owner]
 	if !exists {
 		userStorage = &UserStorage{Username: owner}
@@ -359,7 +737,9 @@ func (s *Service) DeleteFile(bucket, filename, owner string) error {
 	}
 	s.mutex.Unlock()
 
-	log.Printf("[OpenAssets] 信息: 文件删除成功。所有者: %s, 路径: %s/%s", owner, bucket, filename)
+	if shouldLog() {
+		log.Printf("[OpenAssets] 信息: 文件删除成功。所有者: %s, 路径: %s/%s", owner, bucket, filename)
+	}
 	return nil
 }
 
@@ -367,6 +747,10 @@ func (s *Service) DeleteFile(bucket, filename, owner string) error {
 func (s *Service) UploadHandler(c *gin.Context) {
 	bucket := c.Param("bucket")
 	username := c.MustGet("username").(string)
+	if !isSafeBucketName(bucket) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid bucket"})
+		return
+	}
 
 	file, header, err := c.Request.FormFile("file")
 	if err != nil {
@@ -385,7 +769,7 @@ func (s *Service) UploadHandler(c *gin.Context) {
 
 	metadata, err := s.UploadFile(bucket, safeFilename, header.Filename, contentType, username, header.Size, file)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "上传失败: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "上传失败: " + err.Error()})
 		return
 	}
 
@@ -410,12 +794,35 @@ var (
 
 // getCompressedPath 获取压缩图的存储路径
 func (s *Service) getCompressedPath(bucket, filename, qualityType string) string {
-	// 压缩图存储在 compressed 子目录
 	base := filepath.Base(filename)
 	ext := filepath.Ext(base)
 	name := strings.TrimSuffix(base, ext)
-	compressedName := fmt.Sprintf("%s_%s.jpg", name, qualityType)
+	compressedName := fmt.Sprintf("%s_%s%s", name, qualityType, ext)
 	return filepath.Join(s.config.StoragePath, bucket, "compressed", compressedName)
+}
+
+func (s *Service) findRealFilename(bucket, publicName string) (string, error) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	indexKey := bucket + "/" + publicName
+	if meta, ok := s.nameIndex[indexKey]; ok {
+		return meta.FileName, nil
+	}
+
+	return "", fmt.Errorf("file not found")
+}
+
+func (s *Service) findMetadataByFilename(bucket, filename string) (*FileMetadata, bool) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	for _, meta := range s.fileStore {
+		if meta.Bucket == bucket && meta.FileName == filename {
+			return meta, true
+		}
+	}
+	return nil, false
 }
 
 // resizeImage 调整图片尺寸（简单的最近邻算法）
@@ -452,107 +859,146 @@ func resizeImage(img image.Image, maxWidth int) image.Image {
 }
 
 // generateCompressedImage 生成压缩图并保存到磁盘
-func (s *Service) generateCompressedImage(originalPath, compressedPath string, quality ImageQuality) error {
-	// 打开原始文件
-	file, err := os.Open(originalPath)
+func (s *Service) generateCompressedImage(bucket, realFilename, compressedPath string, quality ImageQuality) error {
+	file, err := os.Open(filepath.Join(s.config.StoragePath, bucket, realFilename))
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
-	// 解码图片
+	header := make([]byte, 8)
+	if _, err := file.Read(header); err != nil {
+		return fmt.Errorf("读取文件头失败: %w", err)
+	}
+
+	file.Seek(0, 0)
+
 	var img image.Image
-	ext := strings.ToLower(filepath.Ext(originalPath))
-	switch ext {
-	case ".jpg", ".jpeg":
-		img, err = jpeg.Decode(file)
-	case ".png":
-		img, err = png.Decode(file)
-	default:
-		return fmt.Errorf("不支持的图片格式: %s", ext)
+	var decodeErr error
+
+	if isJPEG(header) {
+		img, decodeErr = jpeg.Decode(file)
+	} else if isPNG(header) {
+		img, decodeErr = png.Decode(file)
+	} else {
+		return fmt.Errorf("无法识别的图片格式: %v", header[:4])
 	}
 
-	if err != nil {
-		return fmt.Errorf("解码图片失败: %w", err)
+	if decodeErr != nil {
+		return fmt.Errorf("解码图片失败: %w", decodeErr)
 	}
 
-	// 调整尺寸
 	if quality.MaxWidth > 0 {
 		img = resizeImage(img, quality.MaxWidth)
 	}
 
-	// 确保目录存在
 	if err := os.MkdirAll(filepath.Dir(compressedPath), 0755); err != nil {
 		return fmt.Errorf("创建压缩图目录失败: %w", err)
 	}
 
-	// 创建输出文件
 	outFile, err := os.Create(compressedPath)
 	if err != nil {
 		return fmt.Errorf("创建压缩图文件失败: %w", err)
 	}
 	defer outFile.Close()
 
-	// 编码为 JPEG
-	if err := jpeg.Encode(outFile, img, &jpeg.Options{Quality: quality.Quality}); err != nil {
-		return fmt.Errorf("编码图片失败: %w", err)
+	var contentType string
+	if isJPEG(header) {
+		if err := jpeg.Encode(outFile, img, &jpeg.Options{Quality: quality.Quality}); err != nil {
+			return fmt.Errorf("编码图片失败: %w", err)
+		}
+		contentType = "image/jpeg"
+	} else if isPNG(header) {
+		if err := png.Encode(outFile, img); err != nil {
+			return fmt.Errorf("编码图片失败: %w", err)
+		}
+		contentType = "image/png"
 	}
 
-	log.Printf("[OpenAssets] 生成压缩图成功: %s (质量: %s, %d%%)", compressedPath, quality.Name, quality.Quality)
+	info, _ := os.Stat(compressedPath)
+	cfile := &CompressedFile{
+		ID:                 uuid.New().String(),
+		Bucket:             bucket,
+		OriginalFileName:   realFilename,
+		CompressedFileName: filepath.Base(compressedPath),
+		Quality:            quality.Name,
+		FileSize:           info.Size(),
+		ContentType:        contentType,
+	}
+	if meta, ok := s.findMetadataByFilename(bucket, realFilename); ok {
+		cfile.OriginalID = meta.ID
+	}
+	if s.assetsDB != nil {
+		_ = SaveCompressedFile(s.assetsDB, cfile)
+	}
+
+	if shouldLog() {
+		log.Printf("[OpenAssets] 生成压缩图成功: %s (质量: %s, %d%%)", compressedPath, quality.Name, quality.Quality)
+	}
 	return nil
+}
+
+func isJPEG(header []byte) bool {
+	return len(header) >= 3 && header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF
+}
+
+func isPNG(header []byte) bool {
+	return len(header) >= 8 && header[0] == 0x89 && header[1] == 0x50 && header[2] == 0x4E && header[3] == 0x47
 }
 
 // DownloadHandler 是文件下载的 Gin 处理程序。此端点通常是公开的。
 func (s *Service) DownloadHandler(c *gin.Context) {
 	bucket := c.Param("bucket")
-	filename := c.Param("filename")
+	publicName := c.Param("filename")
 
-	// 基本的安全检查，防止路径遍历
-	if strings.Contains(filename, "..") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的文件名"})
+	if !isSafeBucketName(bucket) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的bucket"})
 		return
 	}
 
-	// 原图路径
-	originalPath := filepath.Join(s.config.StoragePath, bucket, filename)
+	publicName = stripExtension(publicName)
 
-	// 检查原图是否存在
-	if _, err := os.Stat(originalPath); os.IsNotExist(err) {
-		log.Printf("拒绝连接: 访问不存在的文件 %s/%s", bucket, filename)
+	realFilename, err := s.findRealFilename(bucket, publicName)
+	if err != nil {
+		log.Printf("拒绝连接: 访问不存在的文件 %s/%s: %v", bucket, publicName, err)
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
 
-	// 判断是否为图片文件
-	ext := strings.ToLower(filepath.Ext(filename))
-	isImage := ext == ".jpg" || ext == ".jpeg" || ext == ".png"
-
-	// 设置缓存头（7天）
-	c.Header("Cache-Control", "public, max-age=604800")
-	c.Header("Content-Disposition", fmt.Sprintf("inline; filename=%q", filename))
-
-	// 非图片文件直接返回
-	if !isImage {
-		contentType := utils.GetContentTypeByExtension(filename)
-		if contentType != "" {
-			c.Header("Content-Type", contentType)
-		} else {
-			c.Header("Content-Type", "application/octet-stream")
-		}
-		c.File(originalPath)
+	originalPath, err := s.resolveStoragePath(bucket, realFilename)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的文件请求"})
 		return
 	}
 
-	// 图片文件：获取质量参数
-	qualityType := c.DefaultQuery("type", "medium") // 默认中等质量
-	_, hasYt := c.GetQuery("yt")
+	if _, err := os.Stat(originalPath); os.IsNotExist(err) {
+		log.Printf("拒绝连接: 物理文件不存在 %s/%s", bucket, realFilename)
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
 
-	// yt 参数优先，返回原图
+	ext := strings.ToLower(filepath.Ext(realFilename))
+	isImage := ext == ".jpg" || ext == ".jpeg" || ext == ".png"
+
+	qualityType := c.DefaultQuery("type", "medium")
+	_, hasYt := c.GetQuery("yt")
 	if hasYt {
 		qualityType = "original"
 	}
 
-	// 根据质量类型选择配置
+	c.Header("Cache-Control", "public, max-age=31536000, immutable")
+
+	if !isImage {
+		contentType := utils.GetContentTypeByExtension(realFilename)
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		c.Header("Content-Type", contentType)
+		c.Header("Content-Disposition", fmt.Sprintf("inline; filename=%q", realFilename))
+		c.File(originalPath)
+		return
+	}
+
 	var quality ImageQuality
 	switch qualityType {
 	case "thumb":
@@ -560,33 +1006,66 @@ func (s *Service) DownloadHandler(c *gin.Context) {
 	case "medium":
 		quality = QualityMedium
 	case "original":
-		// 返回原图
 		c.Header("Content-Type", "image/"+strings.TrimPrefix(ext, "."))
+		c.Header("Content-Disposition", fmt.Sprintf("inline; filename=%q", realFilename))
 		c.File(originalPath)
 		return
 	default:
-		// 未知类型，返回中等质量
 		quality = QualityMedium
 	}
 
-	// 获取压缩图路径
-	compressedPath := s.getCompressedPath(bucket, filename, quality.Name)
+	compressedPath := s.getCompressedPath(bucket, realFilename, quality.Name)
 
-	// 懒生成策略：检查压缩图是否存在
-	if _, err := os.Stat(compressedPath); os.IsNotExist(err) {
-		// 压缩图不存在，生成它
-		log.Printf("[OpenAssets] 压缩图不存在，开始生成: %s", compressedPath)
-		if err := s.generateCompressedImage(originalPath, compressedPath, quality); err != nil {
-			// 生成失败，返回原图
-			log.Printf("[OpenAssets] 生成压缩图失败: %v，返回原图", err)
+	if s.assetsDB != nil {
+		if cf, err := GetCompressedFile(s.assetsDB, realFilename, quality.Name); err == nil && cf != nil {
+			if _, statErr := os.Stat(compressedPath); statErr == nil {
+				if shouldLog() {
+					log.Printf("[OpenAssets] DB命中压缩图: %s -> %s", realFilename, cf.CompressedFileName)
+				}
+				c.Header("Content-Type", cf.ContentType)
+				c.Header("Content-Disposition", fmt.Sprintf("inline; filename=%q", realFilename))
+				c.File(compressedPath)
+				return
+			}
+			if shouldLog() {
+				log.Printf("[OpenAssets] DB命中但文件不存在，将重新生成: %s", compressedPath)
+			}
+		} else if err != nil {
+			if shouldLog() {
+				log.Printf("[OpenAssets] DB查询压缩图失败: %v", err)
+			}
+		} else {
+			if shouldLog() {
+				log.Printf("[OpenAssets] DB未命中压缩图: %s (quality=%s)", realFilename, quality.Name)
+			}
+		}
+	}
+
+	_, statErr := os.Stat(compressedPath)
+	if os.IsNotExist(statErr) {
+		sfKey := fmt.Sprintf("%s/%s/%s", bucket, realFilename, quality.Name)
+		_, err, _ = s.sfGroup.Do(sfKey, func() (interface{}, error) {
+			if _, err := os.Stat(compressedPath); err == nil {
+				return nil, nil
+			}
+			if shouldLog() {
+				log.Printf("[OpenAssets] 压缩图不存在，开始生成: %s", compressedPath)
+			}
+			return nil, s.generateCompressedImage(bucket, realFilename, compressedPath, quality)
+		})
+		if err != nil {
+			if shouldLog() {
+				log.Printf("[OpenAssets] 生成压缩图失败: %v，返回原图", err)
+			}
 			c.Header("Content-Type", "image/"+strings.TrimPrefix(ext, "."))
 			c.File(originalPath)
 			return
 		}
 	}
 
-	// 返回压缩图
-	c.Header("Content-Type", "image/jpeg")
+	cfExt := filepath.Ext(compressedPath)
+	c.Header("Content-Type", "image/"+strings.TrimPrefix(cfExt, "."))
+	c.Header("Content-Disposition", fmt.Sprintf("inline; filename=%q", realFilename))
 	c.File(compressedPath)
 }
 
@@ -595,6 +1074,10 @@ func (s *Service) DeleteHandler(c *gin.Context) {
 	bucket := c.Param("bucket")
 	filename := c.Param("filename")
 	username := c.MustGet("username").(string)
+	if !isSafeBucketName(bucket) || !isSafeFileName(filename) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request path"})
+		return
+	}
 
 	err := s.DeleteFile(bucket, filename, username)
 	if err != nil {
@@ -614,6 +1097,10 @@ func (s *Service) DeleteHandler(c *gin.Context) {
 func (s *Service) ListHandler(c *gin.Context) {
 	bucket := c.Param("bucket")
 	username := c.MustGet("username").(string)
+	if !isSafeBucketName(bucket) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid bucket"})
+		return
+	}
 
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
@@ -633,6 +1120,10 @@ func (s *Service) InfoHandler(c *gin.Context) {
 	bucket := c.Param("bucket")
 	filename := c.Param("filename")
 	username := c.MustGet("username").(string)
+	if !isSafeBucketName(bucket) || !isSafeFileName(filename) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request path"})
+		return
+	}
 
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()

@@ -10,15 +10,27 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"os"
 	"strings"
 )
 
 // 全局私钥变量
 var PrivateKey *rsa.PrivateKey
 
+// getPrivateKeyPath 获取私钥文件路径
+func getPrivateKeyPath() string {
+	// 优先使用环境变量配置的路径
+	if envPath := os.Getenv("PRIVATE_KEY_PATH"); envPath != "" {
+		return envPath
+	}
+	// 默认路径
+	return "private_key.pem"
+}
+
 // InitPrivateKey 初始化RSA私钥
 func InitPrivateKey() error {
-	keyBytes, err := ioutil.ReadFile("private_key.pem")
+	keyPath := getPrivateKeyPath()
+	keyBytes, err := ioutil.ReadFile(keyPath)
 	if err != nil {
 		return fmt.Errorf("读取私钥文件失败: %v", err)
 	}
@@ -43,7 +55,7 @@ func InitPrivateKey() error {
 		}
 	}
 
-	log.Printf("私钥初始化成功，大小: %d bits", PrivateKey.Size()*8)
+	log.Printf("私钥初始化成功")
 	return nil
 }
 
