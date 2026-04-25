@@ -18,6 +18,7 @@ var (
 	}{
 		m: make(map[string]*model.IpLimiter),
 	}
+	cleanupStarter sync.Once
 )
 
 // 定时清理长时间不用的 limiter
@@ -37,7 +38,9 @@ func cleanupLimiters() {
 
 // Gin 中间件：限流
 func RateLimitMiddleware() gin.HandlerFunc {
-	go cleanupLimiters()
+	cleanupStarter.Do(func() {
+		go cleanupLimiters()
+	})
 
 	return func(c *gin.Context) {
 
