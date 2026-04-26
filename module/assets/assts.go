@@ -4,6 +4,7 @@ import (
 	"Dext-Server/env"
 	"Dext-Server/security"
 	"Dext-Server/utils"
+	"bytes"
 	"crypto/md5"
 	"database/sql"
 	"encoding/hex"
@@ -608,8 +609,11 @@ func (s *Service) UploadFile(bucket, filename, originalName, contentType, owner 
 	if !s.config.AllowedTypes[contentType] {
 		return nil, fmt.Errorf("不允许的文件类型 '%s'", contentType)
 	}
-	if err := s.checkUserStorageLimit(owner, fileSize); err != nil {
-		return nil, err
+	// header.Size 可能不可信/为 0：若可用则先做一次预检查，最终以实际写入大小为准再校验。
+	if fileSize > 0 {
+		if err := s.checkUserStorageLimit(owner, fileSize); err != nil {
+			return nil, err
+		}
 	}
 
 	filePath, err := s.resolveStoragePath(bucket, filename)
@@ -627,12 +631,22 @@ func (s *Service) UploadFile(bucket, filename, originalName, contentType, owner 
 	defer dst.Close()
 
 	hash := md5.New()
-	teeReader := io.TeeReader(fileData, hash)
+	// 限制读取，避免客户端伪报 size 导致超大文件写入
+	limited := io.LimitReader(fileData, s.config.MaxFileSize+1)
+	teeReader := io.TeeReader(limited, hash)
 
 	written, err := io.Copy(dst, teeReader)
 	if err != nil {
 		os.Remove(filePath) // 失败时清理
 		return nil, fmt.Errorf("保存文件内容失败: %w", err)
+	}
+	if written > s.config.MaxFileSize {
+		_ = os.Remove(filePath)
+		return nil, fmt.Errorf("文件大小 (%d 字节) 超过允许的最大大小 (%d 字节)", written, s.config.MaxFileSize)
+	}
+	if err := s.checkUserStorageLimit(owner, written); err != nil {
+		_ = os.Remove(filePath)
+		return nil, err
 	}
 	md5Hash := hex.EncodeToString(hash.Sum(nil))
 
@@ -759,15 +773,41 @@ func (s *Service) UploadHandler(c *gin.Context) {
 	}
 	defer file.Close()
 
-	contentType := header.Header.Get("Content-Type")
-	if contentType == "" || contentType == "application/octet-stream" {
-		contentType = utils.GetContentTypeByExtension(header.Filename)
+	// 不信任客户端声明的 Content-Type：优先基于文件内容嗅探，其次基于扩展名兜底。
+	extType := utils.GetContentTypeByExtension(header.Filename)
+
+	sniffBuf := make([]byte, 512)
+	n, _ := file.Read(sniffBuf)
+	sniff := sniffBuf[:n]
+	detectedType := strings.TrimSpace(strings.Split(http.DetectContentType(sniff), ";")[0])
+	if detectedType == "application/octet-stream" {
+		detectedType = ""
 	}
+
+	contentType := detectedType
+	if contentType == "" {
+		contentType = extType
+	}
+	if contentType == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无法识别文件类型"})
+		return
+	}
+
+	// 对高风险二进制类型更严格：若扩展名表示为图片/音视频/PDF，但内容嗅探失败，则拒绝。
+	if strings.HasPrefix(extType, "image/") || strings.HasPrefix(extType, "video/") || strings.HasPrefix(extType, "audio/") || extType == "application/pdf" {
+		if detectedType == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "文件类型校验失败"})
+			return
+		}
+	}
+
+	// 还原 reader：先读到的 sniff 字节要拼回去，否则会导致文件头丢失
+	fileReader := io.MultiReader(bytes.NewReader(sniff), file)
 
 	// 生成唯一且安全的文件名，以防止覆盖和路径遍历。
 	safeFilename := fmt.Sprintf("%s-%s", uuid.NewString(), filepath.Base(header.Filename))
 
-	metadata, err := s.UploadFile(bucket, safeFilename, header.Filename, contentType, username, header.Size, file)
+	metadata, err := s.UploadFile(bucket, safeFilename, header.Filename, contentType, username, header.Size, fileReader)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "上传失败: " + err.Error()})
 		return
@@ -994,7 +1034,8 @@ func (s *Service) DownloadHandler(c *gin.Context) {
 			contentType = "application/octet-stream"
 		}
 		c.Header("Content-Type", contentType)
-		c.Header("Content-Disposition", fmt.Sprintf("inline; filename=%q", realFilename))
+		// 非图片一律按下载处理，降低被浏览器当作可执行内容渲染的风险
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", realFilename))
 		c.File(originalPath)
 		return
 	}

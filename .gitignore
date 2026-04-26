@@ -15,6 +15,9 @@ bin/*
 .env.*
 !.env.example
 
+# Local build cache
+.gocache/
+
 # Keys / lockfile (never commit)
 private_key.pem
 public_key.pem

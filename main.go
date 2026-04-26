@@ -170,6 +170,7 @@ func main() {
 
 	router.Use(
 		middleware.CorsMiddleware(),
+		middleware.CSRFMiddleware(),
 		middleware.RateLimitMiddleware(),
 		middleware.SecurityHeadersMiddleware(),
 		middleware.DecryptMiddleware(),

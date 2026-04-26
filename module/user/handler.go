@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -39,6 +40,14 @@ func setAuthCookie(c *gin.Context, token string, expires time.Time) {
 	}
 
 	c.SetCookie("access_token", token, maxAge, "/", domain, secure, true)
+
+	// Double-submit CSRF token (not HttpOnly so the browser client can read and echo it)
+	// Cookie name: csrf_token, Header name: X-CSRF-Token
+	csrf := make([]byte, 32)
+	if _, err := rand.Read(csrf); err == nil {
+		csrfToken := base64.RawURLEncoding.EncodeToString(csrf)
+		c.SetCookie("csrf_token", csrfToken, maxAge, "/", domain, secure, false)
+	}
 }
 
 // --- Refresh token helpers ---
@@ -820,6 +829,7 @@ func LogoutHandler(c *gin.Context) {
 		c.SetSameSite(http.SameSiteLaxMode)
 	}
 	c.SetCookie("access_token", "", -1, "/", domain, secure, true)
+	c.SetCookie("csrf_token", "", -1, "/", domain, secure, false)
 
 	c.JSON(http.StatusOK, gin.H{"message": "注销成功"})
 }

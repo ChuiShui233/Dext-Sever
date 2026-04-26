@@ -22,6 +22,9 @@ var db *sql.DB
 var oauthConfig *Config
 var sessionManager *session.SessionManager
 
+// 所有外部 HTTP 请求统一加超时，避免慢连接/卡死拖垮服务端 goroutine。
+var externalHTTPClient = &http.Client{Timeout: 10 * time.Second}
+
 // 初始化OAuth模块
 func InitOAuth(database *sql.DB) {
 	db = database
@@ -195,8 +198,7 @@ func verifyGoogleToken(accessToken string, userInfo *OAuthUserInfo) bool {
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := externalHTTPClient.Do(req)
 	if err != nil {
 		log.Printf("Google令牌验证请求失败: %v", err)
 		return false
@@ -238,8 +240,7 @@ func verifyGitHubToken(accessToken string, userInfo *OAuthUserInfo) bool {
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := externalHTTPClient.Do(req)
 	if err != nil {
 		log.Printf("GitHub令牌验证请求失败: %v", err)
 		return false
@@ -282,8 +283,7 @@ func verifyMicrosoftToken(accessToken string, userInfo *OAuthUserInfo) bool {
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := externalHTTPClient.Do(req)
 	if err != nil {
 		log.Printf("Microsoft令牌验证请求失败: %v", err)
 		return false
@@ -735,7 +735,7 @@ func exchangeCodeForToken(provider, authCode, redirectUri string) (*OAuthUserInf
 // Google授权码交换
 func exchangeGoogleCode(authCode, redirectUri string) (*OAuthUserInfo, string, error) {
 	// 交换访问令牌
-	tokenResp, err := http.PostForm("https://oauth2.googleapis.com/token", map[string][]string{
+	tokenResp, err := externalHTTPClient.PostForm("https://oauth2.googleapis.com/token", map[string][]string{
 		"client_id":     {oauthConfig.GoogleClientID},
 		"client_secret": {oauthConfig.GoogleClientSecret},
 		"code":          {authCode},
@@ -767,7 +767,12 @@ func exchangeGoogleCode(authCode, redirectUri string) (*OAuthUserInfo, string, e
 	}
 
 	// 获取用户信息
-	userResp, err := http.Get("https://www.googleapis.com/oauth2/v2/userinfo?access_token=" + accessToken)
+	userReq, err := http.NewRequest("GET", "https://www.googleapis.com/oauth2/v2/userinfo", nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("创建用户信息请求失败: %v", err)
+	}
+	userReq.Header.Set("Authorization", "Bearer "+accessToken)
+	userResp, err := externalHTTPClient.Do(userReq)
 	if err != nil {
 		return nil, "", fmt.Errorf("获取用户信息失败: %v", err)
 	}
@@ -801,7 +806,7 @@ func exchangeGoogleCode(authCode, redirectUri string) (*OAuthUserInfo, string, e
 // GitHub授权码交换
 func exchangeGitHubCode(authCode string) (*OAuthUserInfo, string, error) {
 	// 交换访问令牌
-	tokenResp, err := http.PostForm("https://github.com/login/oauth/access_token", map[string][]string{
+	tokenResp, err := externalHTTPClient.PostForm("https://github.com/login/oauth/access_token", map[string][]string{
 		"client_id":     {oauthConfig.GitHubClientID},
 		"client_secret": {oauthConfig.GitHubClientSecret},
 		"code":          {authCode},
@@ -841,8 +846,7 @@ func exchangeGitHubCode(authCode string) (*OAuthUserInfo, string, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
-	client := &http.Client{}
-	userResp, err := client.Do(req)
+	userResp, err := externalHTTPClient.Do(req)
 	if err != nil {
 		return nil, "", fmt.Errorf("获取用户信息失败: %v", err)
 	}
@@ -868,7 +872,7 @@ func exchangeGitHubCode(authCode string) (*OAuthUserInfo, string, error) {
 		emailReq, err := http.NewRequest("GET", "https://api.github.com/user/emails", nil)
 		if err == nil {
 			emailReq.Header.Set("Authorization", "Bearer "+accessToken)
-			emailResp, err := client.Do(emailReq)
+			emailResp, err := externalHTTPClient.Do(emailReq)
 			if err == nil && emailResp.StatusCode == http.StatusOK {
 				defer emailResp.Body.Close()
 				emailBody, err := io.ReadAll(emailResp.Body)
@@ -909,7 +913,7 @@ func exchangeGitHubCode(authCode string) (*OAuthUserInfo, string, error) {
 // Microsoft授权码交换
 func exchangeMicrosoftCode(authCode, redirectUri string) (*OAuthUserInfo, string, error) {
 	// 交换访问令牌
-	tokenResp, err := http.PostForm("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", map[string][]string{
+	tokenResp, err := externalHTTPClient.PostForm("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", map[string][]string{
 		"client_id":     {oauthConfig.MicrosoftClientID},
 		"client_secret": {oauthConfig.MicrosoftClientSecret},
 		"code":          {authCode},
@@ -947,8 +951,7 @@ func exchangeMicrosoftCode(authCode, redirectUri string) (*OAuthUserInfo, string
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
-	client := &http.Client{}
-	userResp, err := client.Do(req)
+	userResp, err := externalHTTPClient.Do(req)
 	if err != nil {
 		return nil, "", fmt.Errorf("获取用户信息失败: %v", err)
 	}

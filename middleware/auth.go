@@ -594,53 +594,14 @@ func CorsMiddleware() gin.HandlerFunc {
 		// 根据不同 Origin 进行缓存区分
 		c.Writer.Header().Add("Vary", "Origin")
 
-		// 允许的域名列表
-		allowedOrigins := []string{
-			"https://qs.chuishui.top",
-			"http://localhost:8001",
-			"http://127.0.0.1:8001",
-			"http://192.168.1.4:8001",
-		}
-
-		// 检查是否为pages.dev域名
-		isPagesDev := strings.HasSuffix(origin, ".pages.dev")
-
-		// 检查是否为chuishui.top的子域名
-		isWucodeSubdomain := strings.HasSuffix(origin, ".chuishui.top") || origin == "https://chuishui.top"
-
-		// 检查是否在允许列表中
-		allowed := false
-		for _, allowedOrigin := range allowedOrigins {
-			if origin == allowedOrigin {
-				allowed = true
-				break
-			}
-		}
-
-		// 开发环境放宽：允许本机与私网 IP 的任意端口
-		env := strings.ToLower(os.Getenv("ENV"))
-		isDev := env == "" || env == "dev" || env == "development"
-		isLocalDynamic := strings.HasPrefix(origin, "http://localhost:") ||
-			strings.HasPrefix(origin, "http://127.0.0.1:") ||
-			strings.HasPrefix(origin, "https://localhost:") ||
-			strings.HasPrefix(origin, "https://127.0.0.1:")
-		isLAN := strings.HasPrefix(origin, "http://192.168.") ||
-			strings.HasPrefix(origin, "http://10.") ||
-			strings.HasPrefix(origin, "http://172.") ||
-			strings.HasPrefix(origin, "https://192.168.") ||
-			strings.HasPrefix(origin, "https://10.") ||
-			strings.HasPrefix(origin, "https://172.")
-		if !allowed && isDev && origin != "" && (isLocalDynamic || isLAN) {
-			allowed = true
-		}
-
-		if allowed || isPagesDev || isWucodeSubdomain {
+		// 仅对允许的 Origin 回显 Allow-Origin，并允许携带凭证
+		if IsOriginAllowed(origin) {
 			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
 			c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
 		}
 
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Encrypted, X-Client-Ephemeral-Key, X-Requested-With, Accept")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Encrypted, X-Client-Ephemeral-Key, X-Requested-With, Accept, X-CSRF-Token")
 		c.Writer.Header().Set("Access-Control-Expose-Headers", "X-Encrypted, Content-Type")
 		c.Writer.Header().Set("Access-Control-Max-Age", "86400")
 
