@@ -148,6 +148,6 @@ func generateDesktopRedirectHTML(redirectURL string) string {
 // provider: oauth提供商 (google, github, microsoft)
 // platform: 目标平台 (web, desktop, mobile, dev)
 func GetOAuthCallbackURL(provider, platform string) string {
-	baseURL := "https://wucode.xyz:11222/api/auth/oauth/callback"
+	baseURL := "https://server.chuishui.top:11222/api/auth/oauth/callback"
 	return fmt.Sprintf("%s/%s", baseURL, platform)
 }

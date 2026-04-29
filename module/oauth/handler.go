@@ -165,6 +165,51 @@ func isValidProvider(provider string) bool {
 	return false
 }
 
+// ExchangeCodeForBindingHandler 仅交换授权码获取Provider原始access_token，用于绑定已有账号（不创建用户）
+func ExchangeCodeForBindingHandler(c *gin.Context) {
+	var req struct {
+		Provider  string                 `json:"provider" binding:"required"`
+		OAuthData map[string]interface{} `json:"oauth_data" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求参数错误"})
+		return
+	}
+
+	if !isValidProvider(req.Provider) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "不支持的OAuth提供商"})
+		return
+	}
+
+	authCode, ok := req.OAuthData["authorization_code"].(string)
+	if !ok || authCode == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少授权码"})
+		return
+	}
+
+	redirectUri := getString(req.OAuthData, "redirect_uri")
+
+	userInfo, providerAccessToken, err := exchangeCodeForToken(req.Provider, authCode, redirectUri)
+	if err != nil {
+		log.Printf("ExchangeCodeForBinding: 授权码交换失败: %v", err)
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "授权码验证失败"})
+		return
+	}
+
+	log.Printf("ExchangeCodeForBinding: provider=%s, userID=%s, email=%s, accessToken_len=%d",
+		req.Provider, userInfo.ID, userInfo.Email, len(providerAccessToken))
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":               true,
+		"provider_access_token": providerAccessToken,
+		"provider_user_id":      userInfo.ID,
+		"provider_email":        userInfo.Email,
+		"provider_username":     userInfo.Username,
+		"provider_name":         userInfo.Name,
+	})
+}
+
 // 从map中安全获取字符串值
 func getString(data map[string]interface{}, key string) string {
 	if val, ok := data[key]; ok {
@@ -223,10 +268,21 @@ func verifyGoogleToken(accessToken string, userInfo *OAuthUserInfo) bool {
 	}
 
 	// 验证用户ID匹配
-	if getString(googleUser, "id") != userInfo.ID {
-		log.Printf("Google用户ID不匹配")
+	googleUserID := getString(googleUser, "id")
+	if googleUserID == "" {
+		log.Printf("Google用户ID为空，无法验证")
 		return false
 	}
+	if userInfo.ID != "" && googleUserID != userInfo.ID {
+		log.Printf("Google用户ID不匹配: googleUserID=%s, userInfo.ID=%s", googleUserID, userInfo.ID)
+		return false
+	}
+
+	userInfo.ID = googleUserID
+	userInfo.Email = getString(googleUser, "email")
+	userInfo.Name = getString(googleUser, "name")
+	userInfo.Picture = getString(googleUser, "picture")
+	userInfo.Username = getString(googleUser, "username")
 
 	return true
 }
@@ -266,10 +322,20 @@ func verifyGitHubToken(accessToken string, userInfo *OAuthUserInfo) bool {
 
 	// 验证用户ID匹配
 	githubID := fmt.Sprintf("%.0f", githubUser["id"])
-	if githubID != userInfo.ID {
-		log.Printf("GitHub用户ID不匹配")
+	if githubID == "" {
+		log.Printf("GitHub用户ID为空，无法验证")
 		return false
 	}
+	if userInfo.ID != "" && githubID != userInfo.ID {
+		log.Printf("GitHub用户ID不匹配: githubID=%s, userInfo.ID=%s", githubID, userInfo.ID)
+		return false
+	}
+
+	userInfo.ID = githubID
+	userInfo.Email = getString(githubUser, "email")
+	userInfo.Name = getString(githubUser, "name")
+	userInfo.Picture = getString(githubUser, "avatar_url")
+	userInfo.Username = getString(githubUser, "login")
 
 	return true
 }
@@ -308,16 +374,30 @@ func verifyMicrosoftToken(accessToken string, userInfo *OAuthUserInfo) bool {
 	}
 
 	// 验证用户ID匹配
-	if getString(msUser, "id") != userInfo.ID {
-		log.Printf("Microsoft用户ID不匹配")
+	msUserID := getString(msUser, "id")
+	if msUserID == "" {
+		log.Printf("Microsoft用户ID为空，无法验证")
 		return false
 	}
+	if userInfo.ID != "" && msUserID != userInfo.ID {
+		log.Printf("Microsoft用户ID不匹配: msUserID=%s, userInfo.ID=%s", msUserID, userInfo.ID)
+		return false
+	}
+
+	userInfo.ID = msUserID
+	userInfo.Email = getString(msUser, "mail")
+	if userInfo.Email == "" {
+		userInfo.Email = getString(msUser, "userPrincipalName")
+	}
+	userInfo.Name = getString(msUser, "displayName")
 
 	return true
 }
 
 // 查找或创建OAuth用户
 func findOrCreateOAuthUser(userInfo *OAuthUserInfo) (*model.User, error) {
+	log.Printf("[OAuth] findOrCreateOAuthUser 开始: provider=%s, id=%s, email=%s", userInfo.Provider, userInfo.ID, userInfo.Email)
+
 	// 首先检查是否已有该provider的绑定记录
 	var existingUser model.User
 	err := db.QueryRow(`
@@ -331,10 +411,11 @@ func findOrCreateOAuthUser(userInfo *OAuthUserInfo) (*model.User, error) {
 	)
 
 	if err == nil {
+		log.Printf("[OAuth] 找到现有绑定: user_id=%s, username=%s", existingUser.ID, existingUser.Username)
 		// 已有绑定记录，检查邮箱是否发生变更
 		var oldEmail string
 		err = db.QueryRow(`
-			SELECT provider_email FROM oauth_bindings 
+			SELECT provider_email FROM oauth_bindings
 			WHERE user_id = ? AND provider = ?
 		`, existingUser.ID, userInfo.Provider).Scan(&oldEmail)
 
@@ -1128,6 +1209,7 @@ func BindOAuthHandler(c *gin.Context) {
 		}
 	case "microsoft":
 		userInfo = &OAuthUserInfo{Provider: "microsoft"}
+		log.Printf("BindOAuth: 开始验证Microsoft token, userInfo.ID=%s", userInfo.ID)
 		if !verifyMicrosoftToken(bindRequest.AccessToken, userInfo) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Microsoft令牌验证失败"})
 			return
@@ -1184,6 +1266,7 @@ func BindOAuthHandler(c *gin.Context) {
 
 	log.Printf("用户 %s 成功绑定 %s OAuth账号", userID, provider)
 	c.JSON(http.StatusOK, gin.H{
+		"success":  true,
 		"message":  "OAuth账号绑定成功",
 		"provider": provider,
 		"username": userInfo.Username,

@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"reflect"
 	"strings"
 	"time"
 
@@ -259,6 +260,15 @@ func DecryptMiddleware() gin.HandlerFunc {
 				sendError(c, http.StatusBadRequest, "请求格式错误")
 				c.Abort()
 				return
+			}
+
+			// 调试日志：打印请求路径和加密payload概况
+			log.Printf("XChaCha解密请求: path=%s, payloadKeys=%v", c.Request.URL.Path, reflect.TypeOf(encryptedPayload).Kind())
+			if ephemeralKey, ok := encryptedPayload["ephemeralPublicKey"].(string); ok {
+				log.Printf("  ephemeralPublicKey长度: %d", len(ephemeralKey))
+			}
+			if packet, ok := encryptedPayload["packet"].(string); ok {
+				log.Printf("  packet长度: %d", len(packet))
 			}
 
 			var clientEphemeralKey []byte

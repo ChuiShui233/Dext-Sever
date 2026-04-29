@@ -244,6 +244,7 @@ func main() {
 
 		// OAuth绑定管理（需要登录）
 		protectedGroup.POST("/oauth/:provider/bind", oauth.BindOAuthHandler)
+		protectedGroup.POST("/oauth/exchange-code-for-binding", oauth.ExchangeCodeForBindingHandler)
 		protectedGroup.DELETE("/oauth/:provider/unbind", oauth.UnbindOAuthHandler)
 
 		// 项目相关API

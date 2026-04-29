@@ -222,6 +222,7 @@ func GetCurrentUserHandler(c *gin.Context) {
 	}
 
 	// 添加OAuth绑定信息到用户数据
+	log.Printf("[GetCurrentUserHandler] user_id=%s, oauthBindings=%v", user.ID, oauthBindings)
 	response := map[string]interface{}{
 		"id":             user.ID,
 		"username":       user.Username,

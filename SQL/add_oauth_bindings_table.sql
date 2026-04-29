@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS oauth_bindings (
     provider_name VARCHAR(100) COMMENT 'Provider account display name',
     provider_avatar VARCHAR(500) COMMENT 'Provider account avatar URL',
     is_primary BOOLEAN DEFAULT FALSE COMMENT 'Whether this is the primary login method',
+    binding_method VARCHAR(20) DEFAULT 'manual' COMMENT 'Binding method: manual, auto',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     
