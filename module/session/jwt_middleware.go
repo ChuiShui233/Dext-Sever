@@ -45,7 +45,7 @@ func JWTMiddleware(sm *SessionManager) gin.HandlerFunc {
 
 		// 获取用户信息
 		var username string
-		err = sm.db.QueryRow("SELECT username FROM users WHERE id = ?", session.UserID).Scan(&username)
+		err = sm.db.QueryRow("SELECT username FROM users WHERE id = ? AND is_delete = 0", session.UserID).Scan(&username)
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "用户信息获取失败"})
 			c.Abort()

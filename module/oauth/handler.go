@@ -32,8 +32,8 @@ func InitOAuth(database *sql.DB) {
 	sessionManager = session.NewSessionManager(database)
 
 	if !oauthConfig.IsValid() {
-		log.Println("警告: OAuth配置不完整，某些OAuth提供商可能无法使用")
 	}
+	log.Println("警告: OAuth配置不完整，某些OAuth提供商可能无法使用")
 }
 
 // OAuth认证请求结构
@@ -77,7 +77,6 @@ func OAuthHandler(c *gin.Context) {
 		var err error
 		userInfo, accessToken, err = exchangeCodeForToken(req.Provider, authCode, redirectUri)
 		if err != nil {
-			log.Printf("授权码交换失败: %v", err)
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "授权码验证失败"})
 			return
 		}
@@ -121,7 +120,6 @@ func OAuthHandler(c *gin.Context) {
 	// 查找或创建用户
 	user, err := findOrCreateOAuthUser(userInfo)
 	if err != nil {
-		log.Printf("OAuth用户处理失败: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "用户处理失败"})
 		return
 	}
@@ -129,7 +127,6 @@ func OAuthHandler(c *gin.Context) {
 	// 生成JWT令牌
 	token, expires, err := security.GenerateJWT(user.ID, user.Username)
 	if err != nil {
-		log.Printf("JWT生成失败: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "令牌生成失败"})
 		return
 	}
@@ -139,7 +136,6 @@ func OAuthHandler(c *gin.Context) {
 	userAgent := c.GetHeader("User-Agent")
 	_, err = sessionManager.CreateSession(user.ID, token, clientIP, userAgent, expires)
 	if err != nil {
-		log.Printf("创建会话失败: %v", err)
 		// 不阻塞登录流程，仅记录错误
 	}
 
@@ -192,13 +188,9 @@ func ExchangeCodeForBindingHandler(c *gin.Context) {
 
 	userInfo, providerAccessToken, err := exchangeCodeForToken(req.Provider, authCode, redirectUri)
 	if err != nil {
-		log.Printf("ExchangeCodeForBinding: 授权码交换失败: %v", err)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "授权码验证失败"})
 		return
 	}
-
-	log.Printf("ExchangeCodeForBinding: provider=%s, userID=%s, email=%s, accessToken_len=%d",
-		req.Provider, userInfo.ID, userInfo.Email, len(providerAccessToken))
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":               true,
@@ -238,43 +230,35 @@ func verifyOAuthToken(provider, accessToken string, userInfo *OAuthUserInfo) boo
 func verifyGoogleToken(accessToken string, userInfo *OAuthUserInfo) bool {
 	req, err := http.NewRequest("GET", "https://www.googleapis.com/oauth2/v2/userinfo", nil)
 	if err != nil {
-		log.Printf("创建Google请求失败: %v", err)
 		return false
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
 	resp, err := externalHTTPClient.Do(req)
 	if err != nil {
-		log.Printf("Google令牌验证请求失败: %v", err)
 		return false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("Google令牌验证失败，状态码: %d", resp.StatusCode)
 		return false
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Printf("读取Google响应失败: %v", err)
 		return false
 	}
 
 	var googleUser map[string]interface{}
 	if err := json.Unmarshal(body, &googleUser); err != nil {
-		log.Printf("解析Google响应失败: %v", err)
 		return false
 	}
 
-	// 验证用户ID匹配
 	googleUserID := getString(googleUser, "id")
 	if googleUserID == "" {
-		log.Printf("Google用户ID为空，无法验证")
 		return false
 	}
 	if userInfo.ID != "" && googleUserID != userInfo.ID {
-		log.Printf("Google用户ID不匹配: googleUserID=%s, userInfo.ID=%s", googleUserID, userInfo.ID)
 		return false
 	}
 
@@ -291,43 +275,35 @@ func verifyGoogleToken(accessToken string, userInfo *OAuthUserInfo) bool {
 func verifyGitHubToken(accessToken string, userInfo *OAuthUserInfo) bool {
 	req, err := http.NewRequest("GET", "https://api.github.com/user", nil)
 	if err != nil {
-		log.Printf("创建GitHub请求失败: %v", err)
 		return false
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
 	resp, err := externalHTTPClient.Do(req)
 	if err != nil {
-		log.Printf("GitHub令牌验证请求失败: %v", err)
 		return false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("GitHub令牌验证失败，状态码: %d", resp.StatusCode)
 		return false
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Printf("读取GitHub响应失败: %v", err)
 		return false
 	}
 
 	var githubUser map[string]interface{}
 	if err := json.Unmarshal(body, &githubUser); err != nil {
-		log.Printf("解析GitHub响应失败: %v", err)
 		return false
 	}
 
-	// 验证用户ID匹配
 	githubID := fmt.Sprintf("%.0f", githubUser["id"])
 	if githubID == "" {
-		log.Printf("GitHub用户ID为空，无法验证")
 		return false
 	}
 	if userInfo.ID != "" && githubID != userInfo.ID {
-		log.Printf("GitHub用户ID不匹配: githubID=%s, userInfo.ID=%s", githubID, userInfo.ID)
 		return false
 	}
 
@@ -344,43 +320,35 @@ func verifyGitHubToken(accessToken string, userInfo *OAuthUserInfo) bool {
 func verifyMicrosoftToken(accessToken string, userInfo *OAuthUserInfo) bool {
 	req, err := http.NewRequest("GET", "https://graph.microsoft.com/v1.0/me", nil)
 	if err != nil {
-		log.Printf("创建Microsoft请求失败: %v", err)
 		return false
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
 	resp, err := externalHTTPClient.Do(req)
 	if err != nil {
-		log.Printf("Microsoft令牌验证请求失败: %v", err)
 		return false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("Microsoft令牌验证失败，状态码: %d", resp.StatusCode)
 		return false
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Printf("读取Microsoft响应失败: %v", err)
 		return false
 	}
 
 	var msUser map[string]interface{}
 	if err := json.Unmarshal(body, &msUser); err != nil {
-		log.Printf("解析Microsoft响应失败: %v", err)
 		return false
 	}
 
-	// 验证用户ID匹配
 	msUserID := getString(msUser, "id")
 	if msUserID == "" {
-		log.Printf("Microsoft用户ID为空，无法验证")
 		return false
 	}
 	if userInfo.ID != "" && msUserID != userInfo.ID {
-		log.Printf("Microsoft用户ID不匹配: msUserID=%s, userInfo.ID=%s", msUserID, userInfo.ID)
 		return false
 	}
 
@@ -396,9 +364,6 @@ func verifyMicrosoftToken(accessToken string, userInfo *OAuthUserInfo) bool {
 
 // 查找或创建OAuth用户
 func findOrCreateOAuthUser(userInfo *OAuthUserInfo) (*model.User, error) {
-	log.Printf("[OAuth] findOrCreateOAuthUser 开始: provider=%s, id=%s, email=%s", userInfo.Provider, userInfo.ID, userInfo.Email)
-
-	// 首先检查是否已有该provider的绑定记录
 	var existingUser model.User
 	err := db.QueryRow(`
 		SELECT u.id, u.username, u.email, u.password_hash, u.created_at, u.updated_at 
@@ -411,8 +376,6 @@ func findOrCreateOAuthUser(userInfo *OAuthUserInfo) (*model.User, error) {
 	)
 
 	if err == nil {
-		log.Printf("[OAuth] 找到现有绑定: user_id=%s, username=%s", existingUser.ID, existingUser.Username)
-		// 已有绑定记录，检查邮箱是否发生变更
 		var oldEmail string
 		err = db.QueryRow(`
 			SELECT provider_email FROM oauth_bindings
@@ -420,21 +383,12 @@ func findOrCreateOAuthUser(userInfo *OAuthUserInfo) (*model.User, error) {
 		`, existingUser.ID, userInfo.Provider).Scan(&oldEmail)
 
 		if err == nil && oldEmail != userInfo.Email {
-			log.Printf("检测到OAuth邮箱变更: %s -> %s (用户: %s, 提供商: %s)",
-				oldEmail, userInfo.Email, existingUser.ID, userInfo.Provider)
-
-			// 检查新邮箱是否被其他用户占用
 			var conflictUserID string
 			conflictErr := db.QueryRow(`
 				SELECT id FROM users WHERE email = ? AND id != ?
 			`, userInfo.Email, existingUser.ID).Scan(&conflictUserID)
 
 			if conflictErr == nil {
-				// 存在邮箱冲突，记录但允许登录（采用最安全的策略）
-				log.Printf("邮箱冲突警告: OAuth邮箱 %s 已被用户 %s 占用，但允许登录",
-					userInfo.Email, conflictUserID)
-
-				// 记录冲突事件
 				_, logErr := db.Exec(`
 					INSERT INTO oauth_email_conflicts (
 						user_id, provider, old_email, new_email, 
@@ -445,12 +399,10 @@ func findOrCreateOAuthUser(userInfo *OAuthUserInfo) (*model.User, error) {
 				`, existingUser.ID, userInfo.Provider, oldEmail, userInfo.Email, conflictUserID)
 
 				if logErr != nil {
-					log.Printf("记录邮箱冲突失败: %v", logErr)
 				}
 			}
 		}
 
-		// 更新绑定信息
 		_, updateErr := db.Exec(`
 			UPDATE oauth_bindings 
 			SET provider_email = ?, provider_username = ?, provider_name = ?, provider_avatar = ?, updated_at = NOW()
@@ -458,27 +410,19 @@ func findOrCreateOAuthUser(userInfo *OAuthUserInfo) (*model.User, error) {
 		`, userInfo.Email, userInfo.Username, userInfo.Name, userInfo.Picture, existingUser.ID, userInfo.Provider)
 
 		if updateErr != nil {
-			log.Printf("更新OAuth绑定记录失败: %v", updateErr)
 		}
 
-		// 更新用户最后登录时间
 		_, updateErr = db.Exec(`
 			UPDATE users SET updated_at = NOW() WHERE id = ?
 		`, existingUser.ID)
 		if updateErr != nil {
-			log.Printf("更新用户登录时间失败: %v", updateErr)
 		}
 
 		return &existingUser, nil
 	}
 
-	// 没有现有绑定，先通过真实邮箱查找主账号
-	// 策略：先查oauth_bindings.provider_email，再查users.email
-	// 这解决了Google账号的users.email是随机OAuth邮箱的问题
 	var user model.User
 
-	// 第一步：检查是否有其他OAuth账号使用相同的provider_email
-	// 这意味着用户用相同邮箱注册了其他OAuth（如GitHub/Microsoft）
 	err = db.QueryRow(`
 		SELECT DISTINCT u.id, u.username, u.email, u.password_hash, u.created_at, u.updated_at
 		FROM users u
@@ -491,10 +435,6 @@ func findOrCreateOAuthUser(userInfo *OAuthUserInfo) (*model.User, error) {
 	)
 
 	if err == nil {
-		// 找到了使用相同邮箱的其他OAuth账号，这就是主账号
-		log.Printf("通过provider_email %s 找到主账号 %s，准备绑定OAuth", userInfo.Email, user.ID)
-
-		// 检查是否已有该provider的绑定
 		var existingBindingCount int
 		bindingCheckErr := db.QueryRow(`
 			SELECT COUNT(*) FROM oauth_bindings 
@@ -502,25 +442,19 @@ func findOrCreateOAuthUser(userInfo *OAuthUserInfo) (*model.User, error) {
 		`, user.ID, userInfo.Provider).Scan(&existingBindingCount)
 
 		if bindingCheckErr == nil && existingBindingCount == 0 {
-			// 没有绑定，创建新绑定
-			log.Printf("主账号 %s 没有%s绑定，自动绑定", user.ID, userInfo.Provider)
-
 			_, bindErr := db.Exec(`
 				INSERT INTO oauth_bindings (user_id, provider, provider_user_id, provider_email, provider_username, provider_name, is_primary) 
 				VALUES (?, ?, ?, ?, ?, ?, FALSE)
 			`, user.ID, userInfo.Provider, userInfo.ID, userInfo.Email, userInfo.Username, userInfo.Name)
 
 			if bindErr == nil {
-				log.Printf("OAuth账号成功绑定到主账号 %s", user.ID)
 			} else {
-				log.Printf("绑定失败: %v", bindErr)
 			}
 		}
 
 		return &user, nil
 	}
 
-	// 第二步：通过users.email查找（常规邮箱注册的用户）
 	err = db.QueryRow(`
 		SELECT id, username, email, password_hash, created_at, updated_at 
 		FROM users 
@@ -531,7 +465,6 @@ func findOrCreateOAuthUser(userInfo *OAuthUserInfo) (*model.User, error) {
 	)
 
 	if err == nil {
-		// 邮箱匹配的用户存在，检查是否已有该provider的绑定
 		var existingBindingCount int
 		bindingCheckErr := db.QueryRow(`
 			SELECT COUNT(*) FROM oauth_bindings 
@@ -539,16 +472,10 @@ func findOrCreateOAuthUser(userInfo *OAuthUserInfo) (*model.User, error) {
 		`, user.ID, userInfo.Provider).Scan(&existingBindingCount)
 
 		if bindingCheckErr != nil {
-			log.Printf("检查OAuth绑定失败: %v", bindingCheckErr)
-			// 如果检查失败，为安全起见创建新账号
 			return createOAuthUser(userInfo)
 		}
 
 		if existingBindingCount > 0 {
-			// 该用户已经绑定了这个provider，这可能是账号劫持尝试
-			log.Printf("安全警告: 用户 %s 已绑定 %s，拒绝重复绑定", user.ID, userInfo.Provider)
-
-			// 记录潜在的账号劫持尝试
 			_, logErr := db.Exec(`
 				INSERT INTO oauth_email_conflicts (
 					user_id, provider, new_email, conflict_user_id, 
@@ -558,36 +485,26 @@ func findOrCreateOAuthUser(userInfo *OAuthUserInfo) (*model.User, error) {
 			`, "oauth_"+userInfo.Provider+"_"+userInfo.ID, userInfo.Provider, userInfo.Email, user.ID)
 
 			if logErr != nil {
-				log.Printf("记录账号劫持尝试失败: %v", logErr)
 			}
 
 			return createOAuthUser(userInfo)
 		}
 
-		// 用户存在且没有该provider的绑定，可以安全绑定
-		log.Printf("OAuth邮箱 %s 匹配现有用户 %s，自动绑定OAuth账号", userInfo.Email, user.ID)
-
-		// 创建OAuth绑定记录
 		_, bindErr := db.Exec(`
 			INSERT INTO oauth_bindings (user_id, provider, provider_user_id, provider_email, provider_username, provider_name, is_primary) 
 			VALUES (?, ?, ?, ?, ?, ?, FALSE)
 		`, user.ID, userInfo.Provider, userInfo.ID, userInfo.Email, userInfo.Username, userInfo.Name)
 
 		if bindErr != nil {
-			log.Printf("创建OAuth绑定记录失败: %v", bindErr)
-			// 绑定失败，创建新账号
 			return createOAuthUser(userInfo)
 		}
 
-		// 更新用户最后登录时间
 		_, updateErr := db.Exec(`
 			UPDATE users SET updated_at = NOW() WHERE id = ?
 		`, user.ID)
 		if updateErr != nil {
-			log.Printf("更新用户登录时间失败: %v", updateErr)
 		}
 
-		log.Printf("OAuth账号成功绑定到现有用户 %s", user.ID)
 		return &user, nil
 	}
 
@@ -595,9 +512,7 @@ func findOrCreateOAuthUser(userInfo *OAuthUserInfo) (*model.User, error) {
 		return nil, fmt.Errorf("查询用户失败: %v", err)
 	}
 
-	// 通过真实邮箱找不到用户，检查是否存在该provider的OAuth账号
-	// 这解决了解绑后重新绑定的问题
-	oauthEmail := generateUniqueOAuthEmail(userInfo)
+	oauthEmail := userInfo.Email
 	var oauthUser model.User
 	oauthErr := db.QueryRow(`
 		SELECT id, username, email, password_hash, created_at, updated_at 
@@ -609,7 +524,6 @@ func findOrCreateOAuthUser(userInfo *OAuthUserInfo) (*model.User, error) {
 	)
 
 	if oauthErr == nil {
-		// 找到OAuth账号，检查是否已有绑定
 		var bindingCount int
 		db.QueryRow(`
 			SELECT COUNT(*) FROM oauth_bindings 
@@ -617,25 +531,18 @@ func findOrCreateOAuthUser(userInfo *OAuthUserInfo) (*model.User, error) {
 		`, oauthUser.ID, userInfo.Provider, userInfo.ID).Scan(&bindingCount)
 
 		if bindingCount == 0 {
-			// 绑定记录丢失（可能被解绑），重新创建绑定
-			log.Printf("OAuth账号 %s 已存在但缺少绑定记录，重新创建: provider=%s, provider_email=%s",
-				oauthUser.ID, userInfo.Provider, userInfo.Email)
-
 			_, bindErr := db.Exec(`
 				INSERT INTO oauth_bindings (user_id, provider, provider_user_id, provider_email, provider_username, provider_name, is_primary) 
 				VALUES (?, ?, ?, ?, ?, ?, TRUE)
 			`, oauthUser.ID, userInfo.Provider, userInfo.ID, userInfo.Email, userInfo.Username, userInfo.Name)
 
 			if bindErr != nil {
-				log.Printf("重新创建OAuth绑定失败: %v", bindErr)
 			}
 		}
 
-		log.Printf("返回现有OAuth账号: %s (%s)", oauthUser.ID, oauthUser.Email)
 		return &oauthUser, nil
 	}
 
-	// 用户不存在，创建新用户
 	return createOAuthUser(userInfo)
 }
 
@@ -644,8 +551,8 @@ func createOAuthUser(userInfo *OAuthUserInfo) (*model.User, error) {
 	// 生成唯一的用户名
 	username := generateUniqueUsername(userInfo)
 
-	// 为OAuth用户生成唯一邮箱，避免与现有用户冲突
-	uniqueEmail := generateUniqueOAuthEmail(userInfo)
+	// 直接使用OAuth用户真实邮箱
+	uniqueEmail := userInfo.Email
 
 	// 生成随机密码哈希（OAuth用户不使用密码登录）
 	randomPassword := security.GenerateRandomString(32)
@@ -670,8 +577,6 @@ func createOAuthUser(userInfo *OAuthUserInfo) (*model.User, error) {
 	if err != nil {
 		// 检查是否是邮箱重复错误
 		if strings.Contains(err.Error(), "Duplicate entry") && strings.Contains(err.Error(), "email") {
-			log.Printf("OAuth邮箱 %s 已存在，尝试查找现有用户", uniqueEmail)
-
 			// 通过OAuth邮箱查找现有用户
 			var existingUser model.User
 			findErr := db.QueryRow(`
@@ -683,8 +588,6 @@ func createOAuthUser(userInfo *OAuthUserInfo) (*model.User, error) {
 			)
 
 			if findErr == nil {
-				log.Printf("找到现有OAuth用户: %s (%s)", existingUser.ID, existingUser.Email)
-
 				// 检查是否已有OAuth绑定
 				var bindingCount int
 				db.QueryRow(`
@@ -693,8 +596,6 @@ func createOAuthUser(userInfo *OAuthUserInfo) (*model.User, error) {
 				`, existingUser.ID, userInfo.Provider, userInfo.ID).Scan(&bindingCount)
 
 				if bindingCount == 0 {
-					// 绑定记录丢失，重新创建
-					log.Printf("OAuth绑定记录丢失，重新创建: 用户=%s, provider=%s", existingUser.ID, userInfo.Provider)
 					db.Exec(`
 						INSERT INTO oauth_bindings (user_id, provider, provider_user_id, provider_email, provider_username, provider_name, is_primary) 
 						VALUES (?, ?, ?, ?, ?, ?, TRUE)
@@ -715,7 +616,6 @@ func createOAuthUser(userInfo *OAuthUserInfo) (*model.User, error) {
 	`, customUserID, userInfo.Provider, userInfo.ID, userInfo.Email, userInfo.Username, userInfo.Name)
 
 	if err != nil {
-		log.Printf("创建OAuth绑定记录失败: %v", err)
 		// 不阻塞用户创建流程
 	}
 
@@ -734,7 +634,6 @@ func createOAuthUser(userInfo *OAuthUserInfo) (*model.User, error) {
 		return nil, fmt.Errorf("查询新创建用户失败: %v", err)
 	}
 
-	log.Printf("OAuth用户创建成功: %s (%s)", user.Username, user.Email)
 	return &user, nil
 }
 
@@ -778,7 +677,6 @@ func generateUniqueUsername(userInfo *OAuthUserInfo) string {
 		var count int
 		err := db.QueryRow("SELECT COUNT(*) FROM users WHERE username = ?", username).Scan(&count)
 		if err != nil {
-			log.Printf("检查用户名唯一性失败: %v", err)
 			break
 		}
 
@@ -815,7 +713,6 @@ func exchangeCodeForToken(provider, authCode, redirectUri string) (*OAuthUserInf
 
 // Google授权码交换
 func exchangeGoogleCode(authCode, redirectUri string) (*OAuthUserInfo, string, error) {
-	// 交换访问令牌
 	tokenResp, err := externalHTTPClient.PostForm("https://oauth2.googleapis.com/token", map[string][]string{
 		"client_id":     {oauthConfig.GoogleClientID},
 		"client_secret": {oauthConfig.GoogleClientSecret},
@@ -828,13 +725,13 @@ func exchangeGoogleCode(authCode, redirectUri string) (*OAuthUserInfo, string, e
 	}
 	defer tokenResp.Body.Close()
 
-	if tokenResp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("令牌交换失败，状态码: %d", tokenResp.StatusCode)
-	}
-
 	tokenBody, err := io.ReadAll(tokenResp.Body)
 	if err != nil {
 		return nil, "", fmt.Errorf("读取令牌响应失败: %v", err)
+	}
+
+	if tokenResp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("令牌交换失败，状态码: %d", tokenResp.StatusCode)
 	}
 
 	var tokenData map[string]interface{}
@@ -886,7 +783,6 @@ func exchangeGoogleCode(authCode, redirectUri string) (*OAuthUserInfo, string, e
 
 // GitHub授权码交换
 func exchangeGitHubCode(authCode string) (*OAuthUserInfo, string, error) {
-	// 交换访问令牌
 	tokenResp, err := externalHTTPClient.PostForm("https://github.com/login/oauth/access_token", map[string][]string{
 		"client_id":     {oauthConfig.GitHubClientID},
 		"client_secret": {oauthConfig.GitHubClientSecret},
@@ -897,13 +793,13 @@ func exchangeGitHubCode(authCode string) (*OAuthUserInfo, string, error) {
 	}
 	defer tokenResp.Body.Close()
 
-	if tokenResp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("令牌交换失败，状态码: %d", tokenResp.StatusCode)
-	}
-
 	tokenBody, err := io.ReadAll(tokenResp.Body)
 	if err != nil {
 		return nil, "", fmt.Errorf("读取令牌响应失败: %v", err)
+	}
+
+	if tokenResp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("令牌交换失败，状态码: %d", tokenResp.StatusCode)
 	}
 
 	// GitHub返回的是URL编码格式
@@ -993,7 +889,6 @@ func exchangeGitHubCode(authCode string) (*OAuthUserInfo, string, error) {
 
 // Microsoft授权码交换
 func exchangeMicrosoftCode(authCode, redirectUri string) (*OAuthUserInfo, string, error) {
-	// 交换访问令牌
 	tokenResp, err := externalHTTPClient.PostForm("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", map[string][]string{
 		"client_id":     {oauthConfig.MicrosoftClientID},
 		"client_secret": {oauthConfig.MicrosoftClientSecret},
@@ -1006,13 +901,13 @@ func exchangeMicrosoftCode(authCode, redirectUri string) (*OAuthUserInfo, string
 	}
 	defer tokenResp.Body.Close()
 
-	if tokenResp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("令牌交换失败，状态码: %d", tokenResp.StatusCode)
-	}
-
 	tokenBody, err := io.ReadAll(tokenResp.Body)
 	if err != nil {
 		return nil, "", fmt.Errorf("读取令牌响应失败: %v", err)
+	}
+
+	if tokenResp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("令牌交换失败，状态码: %d", tokenResp.StatusCode)
 	}
 
 	var tokenData map[string]interface{}
@@ -1104,7 +999,6 @@ func GetOAuthURLHandler(c *gin.Context) {
 	}
 
 	if err != nil {
-		log.Printf("构建授权URL失败: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "构建授权URL失败"})
 		return
 	}
@@ -1209,7 +1103,6 @@ func BindOAuthHandler(c *gin.Context) {
 		}
 	case "microsoft":
 		userInfo = &OAuthUserInfo{Provider: "microsoft"}
-		log.Printf("BindOAuth: 开始验证Microsoft token, userInfo.ID=%s", userInfo.ID)
 		if !verifyMicrosoftToken(bindRequest.AccessToken, userInfo) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Microsoft令牌验证失败"})
 			return
@@ -1224,7 +1117,6 @@ func BindOAuthHandler(c *gin.Context) {
 	`, userID, provider).Scan(&existingBinding)
 
 	if err != nil {
-		log.Printf("检查OAuth绑定失败: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "服务器内部错误"})
 		return
 	}
@@ -1242,7 +1134,6 @@ func BindOAuthHandler(c *gin.Context) {
 	`, provider, userInfo.ID, userID).Scan(&otherUserBinding)
 
 	if err != nil {
-		log.Printf("检查OAuth账号冲突失败: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "服务器内部错误"})
 		return
 	}
@@ -1259,12 +1150,10 @@ func BindOAuthHandler(c *gin.Context) {
 	`, userID, provider, userInfo.ID, userInfo.Email, userInfo.Username, userInfo.Name, userInfo.Picture)
 
 	if err != nil {
-		log.Printf("创建OAuth绑定失败: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "绑定失败"})
 		return
 	}
 
-	log.Printf("用户 %s 成功绑定 %s OAuth账号", userID, provider)
 	c.JSON(http.StatusOK, gin.H{
 		"success":  true,
 		"message":  "OAuth账号绑定成功",
@@ -1297,13 +1186,11 @@ func UnbindOAuthHandler(c *gin.Context) {
 	`, userID, provider).Scan(&bindingExists, &isPrimary)
 
 	if err != nil {
-		log.Printf("检查OAuth绑定失败: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "服务器内部错误"})
 		return
 	}
 
 	if bindingExists == 0 {
-		log.Printf("拒绝连接: 用户 %s 尝试解绑不存在的 %s OAuth绑定", userID, provider)
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
@@ -1317,7 +1204,6 @@ func UnbindOAuthHandler(c *gin.Context) {
 		`, userID).Scan(&hasPassword)
 
 		if err != nil {
-			log.Printf("检查用户密码失败: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "服务器内部错误"})
 			return
 		}
@@ -1335,21 +1221,12 @@ func UnbindOAuthHandler(c *gin.Context) {
 	`, userID, provider)
 
 	if err != nil {
-		log.Printf("删除OAuth绑定失败: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "解绑失败"})
 		return
 	}
 
-	log.Printf("用户 %s 成功解绑 %s OAuth账号", userID, provider)
 	c.JSON(http.StatusOK, gin.H{
 		"message":  "OAuth账号解绑成功",
 		"provider": provider,
 	})
-}
-
-// generateUniqueOAuthEmail 为OAuth用户生成唯一邮箱地址
-func generateUniqueOAuthEmail(userInfo *OAuthUserInfo) string {
-	// 使用provider和provider_user_id生成唯一邮箱
-	// 格式: oauth.{provider}.{provider_user_id}@dext.oauth
-	return fmt.Sprintf("oauth.%s.%s@dext.oauth", userInfo.Provider, userInfo.ID)
 }

@@ -2,7 +2,6 @@ package oauth
 
 import (
 	"fmt"
-	"log"
 	"net/http"
 	"net/url"
 
@@ -25,7 +24,6 @@ func OAuthCallbackProxy(c *gin.Context) {
 
 	// 验证平台参数是否为空
 	if platform == "" {
-		log.Printf("拒绝连接: 平台参数为空")
 		c.AbortWithStatus(http.StatusBadRequest)
 		return
 	}
@@ -33,14 +31,12 @@ func OAuthCallbackProxy(c *gin.Context) {
 	// 验证平台参数是否支持
 	targetURL, ok := platformCallbacks[platform]
 	if !ok {
-		log.Printf("拒绝连接: 未知的平台参数 %s", platform)
 		c.AbortWithStatus(http.StatusBadRequest)
 		return
 	}
 
 	// 验证目标URL是否配置
 	if targetURL == "" {
-		log.Printf("拒绝连接: 平台 %s 的目标URL未配置", platform)
 		c.AbortWithStatus(http.StatusInternalServerError)
 		return
 	}
@@ -52,15 +48,13 @@ func OAuthCallbackProxy(c *gin.Context) {
 	code := queryParams.Get("code")
 	errorParam := queryParams.Get("error")
 	if code == "" && errorParam == "" {
-		log.Printf("拒绝连接: OAuth回调缺少必要参数")
 		c.AbortWithStatus(http.StatusBadRequest)
 		return
 	}
 
-	// 检查state参数（防止CSRF攻击）
+	// 检查state参数（防止CSRF攻击）- 移动端不需要state，因为使用自定义scheme直接回调
 	state := queryParams.Get("state")
-	if state == "" {
-		log.Printf("拒绝连接: 缺少state参数，可能CSRF攻击")
+	if platform != "mobile" && state == "" {
 		c.AbortWithStatus(http.StatusBadRequest)
 		return
 	}
@@ -68,7 +62,6 @@ func OAuthCallbackProxy(c *gin.Context) {
 	// 构建目标URL
 	parsedURL, err := url.Parse(targetURL)
 	if err != nil {
-		log.Printf("拒绝连接: 解析目标URL失败 %v", err)
 		c.AbortWithStatus(http.StatusInternalServerError)
 		return
 	}
@@ -79,17 +72,21 @@ func OAuthCallbackProxy(c *gin.Context) {
 
 	// 验证最终URL
 	if redirectURL == "" {
-		log.Printf("拒绝连接: 构建的重定向URL为空")
 		c.AbortWithStatus(http.StatusInternalServerError)
 		return
 	}
 
-	log.Printf("OAuth回调代理: 平台=%s, 目标=%s", platform, redirectURL)
-
-	// 对于自定义协议（dext://），返回HTML页面进行客户端重定向
+	// 对于桌面平台，使用HTML页面进行重定向
 	if platform == "desktop" {
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, generateDesktopRedirectHTML(redirectURL))
+		return
+	}
+
+	// 对于移动端平台，使用HTML页面让WebView提取参数，然后重定向到自定义scheme
+	if platform == "mobile" {
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, generateMobileRedirectHTML())
 		return
 	}
 
@@ -134,7 +131,7 @@ func generateDesktopRedirectHTML(redirectURL string) string {
     <script>
         // 立即尝试打开自定义协议
         window.location.href = "%s";
-        
+
         // 2秒后关闭窗口（如果浏览器允许）
         setTimeout(function() {
             window.close();
@@ -142,6 +139,55 @@ func generateDesktopRedirectHTML(redirectURL string) string {
     </script>
 </body>
 </html>`, redirectURL)
+}
+
+// generateMobileRedirectHTML 生成用于移动端WebView重定向的HTML页面
+func generateMobileRedirectHTML() string {
+	return `<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>OAuth授权完成</title>
+</head>
+<body>
+    <h1>授权成功</h1>
+    <p>正在返回应用...</p>
+    <script>
+        // 从当前URL获取OAuth参数
+        var url = window.location.href;
+        var params = {};
+        var queryString = url.split('?')[1];
+        if (queryString) {
+            var pairs = queryString.split('&');
+            for (var i = 0; i < pairs.length; i++) {
+                var pair = pairs[i].split('=');
+                params[decodeURIComponent(pair[0])] = decodeURIComponent(pair[1] || '');
+            }
+        }
+
+        // 构建dext://回调URL
+        var callbackUrl = 'dext://oauth/callback';
+        if (Object.keys(params).length > 0) {
+            var queryParts = [];
+            for (var key in params) {
+                queryParts.push(encodeURIComponent(key) + '=' + encodeURIComponent(params[key]));
+            }
+            callbackUrl += '?' + queryParts.join('&');
+        }
+
+        // 使用iframe尝试打开自定义scheme
+        var iframe = document.createElement('iframe');
+        iframe.src = callbackUrl;
+        iframe.style.display = 'none';
+        document.body.appendChild(iframe);
+
+        // 同时尝试window.location作为后备
+        setTimeout(function() {
+            window.location.href = callbackUrl;
+        }, 100);
+    </script>
+</body>
+</html>`
 }
 
 // GetOAuthCallbackURL 获取特定平台的OAuth回调URL

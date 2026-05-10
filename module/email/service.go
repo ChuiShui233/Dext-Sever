@@ -22,6 +22,7 @@ const (
 	PurposeRegister      VerificationPurpose = "register"
 	PurposeResetPassword VerificationPurpose = "reset_password"
 	PurposeChangeEmail   VerificationPurpose = "change_email"
+	PurposeDeleteAccount VerificationPurpose = "delete_account"
 )
 
 // EmailProvider 邮件提供商类型
@@ -373,6 +374,49 @@ func (s *EmailService) buildEmailContent(code string, purpose VerificationPurpos
             <p>您正在更换 Dext 账户绑定的邮箱地址。您的验证码是：</p>
             <div class="code">%s</div>
             <p>验证码有效期为 <strong>10分钟</strong>，请尽快完成验证。</p>
+            <p>如果这不是您本人的操作，请忽略此邮件。</p>
+        </div>
+        <div class="footer">
+            <p>此邮件由系统自动发送，请勿回复。</p>
+            <p>&copy; 2025 Dext. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>
+`, username, code)
+
+	case PurposeDeleteAccount:
+		subject = "Dext - 注销账号验证码"
+		body = fmt.Sprintf(`
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+        .header { background: #f8f9fa; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; border-bottom: 3px solid #dc3545; }
+        .header h1 { margin: 0; font-size: 28px; font-weight: 600; color: #333; }
+        .content { background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; }
+        .code { font-size: 32px; font-weight: bold; color: #dc3545; text-align: center; padding: 20px; background: white; border-radius: 8px; letter-spacing: 5px; margin: 20px 0; }
+        .warning { background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0; border-radius: 4px; }
+        .danger { background: #f8d7da; border-left: 4px solid #dc3545; padding: 15px; margin: 20px 0; border-radius: 4px; color: #721c24; }
+        .footer { text-align: center; color: #999; font-size: 12px; margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>注销账号</h1>
+        </div>
+        <div class="content">
+            <p>%s 您好！</p>
+            <p>您正在申请注销 Dext 账户。您的验证码是：</p>
+            <div class="code">%s</div>
+            <p>验证码有效期为 <strong>10分钟</strong>，请尽快完成验证。</p>
+            <div class="danger">
+                <strong>重要提醒：</strong>注销账号将永久删除您的所有数据，包括问卷、答案等，且此操作不可恢复！
+            </div>
             <p>如果这不是您本人的操作，请忽略此邮件。</p>
         </div>
         <div class="footer">

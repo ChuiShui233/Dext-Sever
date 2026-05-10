@@ -39,7 +39,7 @@ func GetOverviewHandler(c *gin.Context) {
 	var totalSurveys, activeSurveys int
 	err = db.QueryRow(`
     SELECT COUNT(*) AS total,
-           SUM(CASE WHEN s.survey_status = 1 THEN 1 ELSE 0 END) AS active
+           COALESCE(SUM(CASE WHEN s.survey_status = 1 THEN 1 ELSE 0 END),0) AS active
     FROM surveys s
     JOIN projects p ON s.project_id = p.id
     WHERE p.create_by = ?`, username).Scan(&totalSurveys, &activeSurveys)

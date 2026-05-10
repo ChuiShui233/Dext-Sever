@@ -21,6 +21,11 @@ func InitEmailService(db *sql.DB) {
 	}
 }
 
+// GetEmailService 获取邮件服务实例
+func GetEmailService() *EmailService {
+	return emailService
+}
+
 // SendVerificationCodeHandler 发送验证码（注册/重置密码，无需登录）
 func SendVerificationCodeHandler(c *gin.Context) {
 	if emailService == nil || !emailService.IsConfigured() {
@@ -255,9 +260,4 @@ func VerifyEmailCodeHandler(c *gin.Context) {
 		"email":    email,
 		"verified": true,
 	})
-}
-
-// GetEmailService 获取邮件服务实例（供其他模块使用）
-func GetEmailService() *EmailService {
-	return emailService
 }

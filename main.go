@@ -45,7 +45,9 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 
 	if err := godotenv.Load(); err != nil {
-		log.Println("No .env file found")
+		log.Println("No .env file found:", err)
+	} else {
+		log.Println(".env file loaded successfully")
 	}
 	env.Init()
 
@@ -308,6 +310,9 @@ func main() {
 		protectedGroup.POST("/user/change-email", user.ChangeEmailHandler)
 		// 修改密码API（需要登录和旧密码验证）
 		protectedGroup.POST("/user/change-password", user.ChangePasswordHandler)
+		// 注销账号API（需要登录）
+		protectedGroup.POST("/user/delete-account/send-code", user.SendDeleteAccountCodeHandler)
+		protectedGroup.POST("/user/delete-account", user.DeleteAccountHandler)
 
 	}
 

@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS email_verifications (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     email VARCHAR(255) NOT NULL COMMENT 'Target email address',
     code VARCHAR(6) NOT NULL COMMENT '6-digit verification code',
-    purpose ENUM('register', 'reset_password', 'change_email') NOT NULL COMMENT 'Verification purpose',
+    purpose ENUM('register', 'reset_password', 'change_email', 'delete_account') NOT NULL COMMENT 'Verification purpose',
     user_id VARCHAR(64) NULL COMMENT 'Associated user ID (for password reset/email change)',
     verified BOOLEAN DEFAULT FALSE COMMENT 'Whether verified',
     expires_at DATETIME NOT NULL COMMENT 'Expiration time',

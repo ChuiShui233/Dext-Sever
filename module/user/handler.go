@@ -3,6 +3,7 @@ package user
 import (
 	"Dext-Server/config"
 	"Dext-Server/model"
+	"Dext-Server/module/email"
 	"Dext-Server/security"
 	"Dext-Server/utils"
 	"crypto/rand"
@@ -455,7 +456,7 @@ func LoginHandler(c *gin.Context) {
 		LockedUntil    *time.Time
 	}
 
-	stmt, err := db.Prepare("SELECT id, password_hash, failed_attempts, locked_until FROM users WHERE username = ?")
+	stmt, err := db.Prepare("SELECT id, password_hash, failed_attempts, locked_until FROM users WHERE username = ? AND is_delete = 0")
 	if err != nil {
 		utils.LogError("预处理语句创建失败", err)
 		utils.SendError(c, http.StatusInternalServerError, "系统错误", err)
@@ -1418,4 +1419,236 @@ func ChangePasswordWithEmailHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message": "密码修改成功",
 	})
+}
+
+func SendDeleteAccountCodeHandler(c *gin.Context) {
+	emailSvc := email.GetEmailService()
+	if emailSvc == nil || !emailSvc.IsConfigured() {
+		utils.SendError(c, http.StatusServiceUnavailable, "邮件服务未配置")
+		return
+	}
+
+	username, exists := c.Get("username")
+	if !exists {
+		utils.SendError(c, http.StatusUnauthorized, "请先登录")
+		return
+	}
+	userID, exists := c.Get("user_id")
+	if !exists {
+		utils.SendError(c, http.StatusUnauthorized, "请先登录")
+		return
+	}
+
+	var emailAddr sql.NullString
+	err := config.DB.QueryRow("SELECT email FROM users WHERE id = ?", userID).Scan(&emailAddr)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			utils.SendError(c, http.StatusNotFound, "用户不存在")
+			return
+		}
+		utils.SendError(c, http.StatusInternalServerError, "系统错误", err)
+		return
+	}
+
+	if !emailAddr.Valid || emailAddr.String == "" {
+		utils.SendError(c, http.StatusBadRequest, "用户未绑定邮箱，无法发送注销验证码")
+		return
+	}
+
+	usernameStr, ok := username.(string)
+	if !ok {
+		utils.SendError(c, http.StatusInternalServerError, "系统错误")
+		return
+	}
+
+	userIDStr, ok := userID.(string)
+	if !ok {
+		utils.SendError(c, http.StatusInternalServerError, "系统错误")
+		return
+	}
+
+	_, err = emailSvc.SendVerificationCode(emailAddr.String, email.PurposeDeleteAccount, userIDStr, usernameStr)
+	if err != nil {
+		log.Printf("发送注销账号验证码失败: %v", err)
+		utils.SendError(c, http.StatusInternalServerError, "发送验证码失败")
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "验证码已发送到您的邮箱",
+		"email":   emailAddr.String,
+	})
+}
+
+// DeleteAccountHandler 永久注销账号（需要登录）
+// 绑定邮箱的用户需要邮箱验证码，纯OAuth用户使用密码验证
+func DeleteAccountHandler(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		utils.SendError(c, http.StatusUnauthorized, "请先登录")
+		return
+	}
+
+	var req struct {
+		Code            string `json:"code"`
+		Password        string `json:"password"`
+		ConfirmPassword string `json:"confirmPassword"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.SendError(c, http.StatusBadRequest, "请求参数错误", err)
+		return
+	}
+
+	if req.Password != req.ConfirmPassword {
+		utils.SendError(c, http.StatusBadRequest, "两次密码输入不一致")
+		return
+	}
+
+	var user struct {
+		ID           string
+		Email        sql.NullString
+		PasswordHash string
+	}
+	err := config.DB.QueryRow(`
+		SELECT id, email, password_hash FROM users WHERE id = ?
+	`, userID).Scan(&user.ID, &user.Email, &user.PasswordHash)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			utils.SendError(c, http.StatusNotFound, "用户不存在")
+			return
+		}
+		utils.SendError(c, http.StatusInternalServerError, "系统错误", err)
+		return
+	}
+
+	if user.Email.Valid && user.Email.String != "" && !strings.HasSuffix(user.Email.String, "@dext.oauth") {
+		if req.Code == "" {
+			utils.SendError(c, http.StatusBadRequest, "请输入邮箱验证码")
+			return
+		}
+		verified, err := verifyEmailCode(user.Email.String, req.Code, email.PurposeDeleteAccount)
+		if err != nil || !verified {
+			utils.SendError(c, http.StatusBadRequest, "邮箱验证码错误或已过期")
+			return
+		}
+	} else {
+		if req.Password == "" {
+			utils.SendError(c, http.StatusBadRequest, "请输入密码")
+			return
+		}
+		pepper := security.GetPepper()
+		valid, err := security.VerifyPassword(req.Password, pepper, user.PasswordHash)
+		if err != nil || !valid {
+			utils.SendError(c, http.StatusBadRequest, "密码错误")
+			return
+		}
+	}
+
+	tx, err := config.DB.Begin()
+	if err != nil {
+		utils.SendError(c, http.StatusInternalServerError, "系统错误", err)
+		return
+	}
+	defer tx.Rollback()
+
+	// 获取当前令牌并添加到Redis黑名单
+	tokenString := c.GetHeader("Authorization")
+	if cookieToken, err := c.Cookie("access_token"); (tokenString == "" || tokenString == "Bearer ") && err == nil {
+		tokenString = "Bearer " + cookieToken
+	}
+	if tokenString != "" {
+		// 将当前令牌添加到Redis黑名单
+		_ = config.AddToBlacklist(tokenString)
+
+		// 清除会话密钥
+		if username, exists := c.Get("username"); exists {
+			if usernameStr, ok := username.(string); ok {
+				security.RemoveSessionKey(usernameStr)
+			}
+		}
+
+		// 清除JTI会话密钥
+		if jti, exists := c.Get("jti"); exists {
+			if jtiStr, ok := jti.(string); ok {
+				security.RemoveSessionKey(jtiStr)
+			}
+		}
+	}
+
+	_, err = tx.Exec("DELETE FROM user_sessions WHERE user_id = ?", userID)
+	if err != nil {
+		log.Printf("删除用户会话失败: %v", err)
+	}
+
+	_, err = tx.Exec("DELETE FROM refresh_tokens WHERE user_id = ?", userID)
+	if err != nil {
+		log.Printf("删除刷新令牌失败: %v", err)
+	}
+
+	_, err = tx.Exec("DELETE FROM oauth_bindings WHERE user_id = ?", userID)
+	if err != nil {
+		log.Printf("删除OAuth绑定失败: %v", err)
+	}
+
+	// 匿名化用户提交的问卷答案
+	_, err = tx.Exec("UPDATE answers SET user_account = '匿名用户' WHERE user_id = ?", userID)
+	if err != nil {
+		log.Printf("匿名化问卷答案失败: %v", err)
+	}
+
+	// 标记用户创建的项目，修改创建者名字
+	_, err = tx.Exec("UPDATE projects SET create_by = '用户已注销' WHERE create_by = ?", userID)
+	if err != nil {
+		log.Printf("标记项目创建者失败: %v", err)
+	}
+
+	// 软删除用户：将 is_delete 设为 1，邮箱设为NULL，用户名改为截断的用户ID，记录删除时间
+	_, err = tx.Exec("UPDATE users SET is_delete = 1, email = NULL, username = SUBSTRING(id, 1, 12), deleted_at = NOW() WHERE id = ?", userID)
+	if err != nil {
+		utils.SendError(c, http.StatusInternalServerError, "注销用户失败", err)
+		return
+	}
+
+	if err = tx.Commit(); err != nil {
+		utils.SendError(c, http.StatusInternalServerError, "系统错误", err)
+		return
+	}
+
+	log.Printf("用户 %s 已永久注销账号", userID)
+
+	c.SetCookie("access_token", "", -1, "/", "", false, true)
+	c.SetCookie("csrf_token", "", -1, "/", "", false, false)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "账号已永久注销",
+	})
+}
+
+func verifyEmailCode(email, code string, purpose email.VerificationPurpose) (bool, error) {
+	var verified bool
+	var expiresAt time.Time
+	err := config.DB.QueryRow(`
+		SELECT verified, expires_at FROM email_verifications
+		WHERE email = ? AND code = ? AND purpose = ?
+		ORDER BY created_at DESC LIMIT 1
+	`, email, code, purpose).Scan(&verified, &expiresAt)
+
+	if err != nil {
+		return false, err
+	}
+
+	if verified {
+		return false, fmt.Errorf("验证码已使用")
+	}
+
+	if time.Now().After(expiresAt) {
+		return false, fmt.Errorf("验证码已过期")
+	}
+
+	_, err = config.DB.Exec(`
+		UPDATE email_verifications SET verified = TRUE, verified_at = NOW()
+		WHERE email = ? AND code = ? AND purpose = ?
+	`, email, code, purpose)
+
+	return true, err
 }

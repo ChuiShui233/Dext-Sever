@@ -34,27 +34,27 @@ func NewSessionManager(database *sql.DB) *SessionManager {
 func (sm *SessionManager) CreateSession(userID, token, ipAddress, userAgent string, expiresAt time.Time) (*Session, error) {
 	sessionID := generateSessionID()
 	tokenHash := hashToken(token)
-	
+
 	session := &Session{
-		ID:           sessionID,
-		UserID:       userID,
-		TokenHash:    tokenHash,
-		ExpiresAt:    expiresAt,
-		IPAddress:    ipAddress,
-		UserAgent:    userAgent,
-		IsActive:     true,
+		ID:        sessionID,
+		UserID:    userID,
+		TokenHash: tokenHash,
+		ExpiresAt: expiresAt,
+		IPAddress: ipAddress,
+		UserAgent: userAgent,
+		IsActive:  true,
 	}
-	
+
 	_, err := sm.db.Exec(`
 		INSERT INTO user_sessions (id, user_id, token_hash, expires_at, ip_address, user_agent, is_active)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, session.ID, session.UserID, session.TokenHash, session.ExpiresAt, 
-	   session.IPAddress, session.UserAgent, session.IsActive)
-	
+	`, session.ID, session.UserID, session.TokenHash, session.ExpiresAt,
+		session.IPAddress, session.UserAgent, session.IsActive)
+
 	if err != nil {
 		return nil, fmt.Errorf("创建会话失败: %v", err)
 	}
-	
+
 	log.Printf("为用户 %s 创建新会话: %s", userID, sessionID)
 	return session, nil
 }
@@ -66,15 +66,15 @@ func (sm *SessionManager) ValidateSession(token string) (*Session, error) {
 		return nil, fmt.Errorf("token has been revoked")
 	}
 	if claims, err := security.ParseTokenClaims(token); err == nil {
-		// JWT有效，检查用户是否存在
+		// JWT有效，检查用户是否存在且未删除
 		var userID string
-		err := sm.db.QueryRow("SELECT id FROM users WHERE id = ?", claims.Subject).Scan(&userID)
+		err := sm.db.QueryRow("SELECT id FROM users WHERE id = ? AND is_delete = 0", claims.Subject).Scan(&userID)
 		tokenHash := hashToken(token)
 		var session Session
 		if err != nil {
-			return nil, fmt.Errorf("用户不存在: %v", err)
+			return nil, fmt.Errorf("用户不存在或已注销: %v", err)
 		}
-		
+
 		// 返回虚拟会话对象
 		err = sm.db.QueryRow(`
 			SELECT id, user_id, token_hash, expires_at, created_at, last_accessed,
@@ -104,32 +104,33 @@ func (sm *SessionManager) ValidateSession(token string) (*Session, error) {
 			IsActive:     true,
 		}, nil
 	}
-	
-	// JWT验证失败，尝试会话表验证
+
+	// JWT验证失败，尝试会话表验证（同时检查用户未删除）
 	tokenHash := hashToken(token)
-	
+
 	var session Session
 	err := sm.db.QueryRow(`
-		SELECT id, user_id, token_hash, expires_at, created_at, last_accessed, 
-		       ip_address, user_agent, is_active
-		FROM user_sessions 
-		WHERE token_hash = ? AND is_active = TRUE AND expires_at > NOW()
+		SELECT s.id, s.user_id, s.token_hash, s.expires_at, s.created_at, s.last_accessed,
+		       s.ip_address, s.user_agent, s.is_active
+		FROM user_sessions s
+		INNER JOIN users u ON s.user_id = u.id
+		WHERE s.token_hash = ? AND s.is_active = TRUE AND s.expires_at > NOW() AND u.is_delete = 0
 	`, tokenHash).Scan(
 		&session.ID, &session.UserID, &session.TokenHash, &session.ExpiresAt,
 		&session.CreatedAt, &session.LastAccessed, &session.IPAddress,
 		&session.UserAgent, &session.IsActive,
 	)
-	
+
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("会话无效或已过期")
 		}
 		return nil, fmt.Errorf("验证会话失败: %v", err)
 	}
-	
+
 	// 更新最后访问时间
 	sm.UpdateLastAccessed(session.ID)
-	
+
 	return &session, nil
 }
 
@@ -140,7 +141,7 @@ func (sm *SessionManager) UpdateLastAccessed(sessionID string) error {
 		SET last_accessed = NOW() 
 		WHERE id = ?
 	`, sessionID)
-	
+
 	return err
 }
 
@@ -151,11 +152,11 @@ func (sm *SessionManager) RevokeSession(sessionID string) error {
 		SET is_active = FALSE 
 		WHERE id = ?
 	`, sessionID)
-	
+
 	if err != nil {
 		return fmt.Errorf("撤销会话失败: %v", err)
 	}
-	
+
 	log.Printf("会话已撤销: %s", sessionID)
 	return nil
 }
@@ -167,11 +168,11 @@ func (sm *SessionManager) RevokeUserSessions(userID string) error {
 		SET is_active = FALSE 
 		WHERE user_id = ? AND is_active = TRUE
 	`, userID)
-	
+
 	if err != nil {
 		return fmt.Errorf("撤销用户会话失败: %v", err)
 	}
-	
+
 	affected, _ := result.RowsAffected()
 	log.Printf("已撤销用户 %s 的 %d 个会话", userID, affected)
 	return nil
@@ -183,16 +184,16 @@ func (sm *SessionManager) CleanupExpiredSessions() error {
 		DELETE FROM user_sessions 
 		WHERE expires_at < NOW() OR is_active = FALSE
 	`)
-	
+
 	if err != nil {
 		return fmt.Errorf("清理过期会话失败: %v", err)
 	}
-	
+
 	affected, _ := result.RowsAffected()
 	if affected > 0 {
 		log.Printf("已清理 %d 个过期会话", affected)
 	}
-	
+
 	return nil
 }
 
@@ -208,7 +209,7 @@ func (sm *SessionManager) LimitUserSessions(userID string, maxSessions int) erro
 		SET s1.is_active = FALSE
 		WHERE s2.rn > ?
 	`, userID, maxSessions)
-	
+
 	return err
 }
 
@@ -221,12 +222,12 @@ func (sm *SessionManager) GetUserSessions(userID string) ([]Session, error) {
 		WHERE user_id = ? AND is_active = TRUE AND expires_at > NOW()
 		ORDER BY last_accessed DESC
 	`, userID)
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("查询用户会话失败: %v", err)
 	}
 	defer rows.Close()
-	
+
 	var sessions []Session
 	for rows.Next() {
 		var session Session
@@ -240,24 +241,24 @@ func (sm *SessionManager) GetUserSessions(userID string) ([]Session, error) {
 		}
 		sessions = append(sessions, session)
 	}
-	
+
 	return sessions, nil
 }
 
 // BlacklistToken 将令牌加入黑名单
 func (sm *SessionManager) BlacklistToken(token, userID, reason string, expiresAt time.Time) error {
 	tokenHash := hashToken(token)
-	
+
 	_, err := sm.db.Exec(`
 		INSERT INTO jwt_blacklist (token_hash, user_id, expires_at, reason)
 		VALUES (?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE revoked_at = NOW(), reason = VALUES(reason)
 	`, tokenHash, userID, expiresAt, reason)
-	
+
 	if err != nil {
 		return fmt.Errorf("令牌加入黑名单失败: %v", err)
 	}
-	
+
 	log.Printf("令牌已加入黑名单: 用户=%s, 原因=%s", userID, reason)
 	return nil
 }
@@ -265,19 +266,19 @@ func (sm *SessionManager) BlacklistToken(token, userID, reason string, expiresAt
 // IsTokenBlacklisted 检查令牌是否在黑名单中
 func (sm *SessionManager) IsTokenBlacklisted(token string) bool {
 	tokenHash := hashToken(token)
-	
+
 	var count int
 	err := sm.db.QueryRow(`
 		SELECT COUNT(*) FROM jwt_blacklist 
 		WHERE token_hash = ? AND expires_at > NOW()
 	`, tokenHash).Scan(&count)
-	
+
 	return err == nil && count > 0
 }
 
 // 生成会话ID
 func generateSessionID() string {
-	return fmt.Sprintf("sess_%d_%s", time.Now().UnixNano(), 
+	return fmt.Sprintf("sess_%d_%s", time.Now().UnixNano(),
 		hex.EncodeToString([]byte(fmt.Sprintf("%d", time.Now().UnixNano())))[:8])
 }
 
@@ -292,13 +293,13 @@ func (sm *SessionManager) StartCleanupRoutine() {
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour) // 每小时清理一次
 		defer ticker.Stop()
-		
+
 		for range ticker.C {
 			if err := sm.CleanupExpiredSessions(); err != nil {
 				log.Printf("定期清理会话失败: %v", err)
 			}
 		}
 	}()
-	
+
 	log.Println("会话清理服务已启动")
 }
