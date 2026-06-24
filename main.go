@@ -513,15 +513,26 @@ func startHTTPSServer(router *gin.Engine, httpsPort, certFile, keyFile string, h
 		Handler: router,
 		TLSConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
+			CurvePreferences: []tls.CurveID{
+				tls.CurveP256,
+				tls.CurveP384,
+				tls.CurveP521,
+				tls.X25519,
+			},
 			CipherSuites: []uint16{
+				// ECDHE-ECDSA with AES-256-GCM (preferred)
+				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+				// ECDHE-RSA with AES-256-GCM
 				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
 				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
 			},
 		},
-		ReadTimeout:  300 * time.Second, // 5分钟读取超时
-		WriteTimeout: 300 * time.Second, // 5分钟写入超时
-		IdleTimeout:  120 * time.Second, // 2分钟空闲超时
+		ReadTimeout:  300 * time.Second,
+		WriteTimeout: 300 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
 	// 启动HTTPS服务器
