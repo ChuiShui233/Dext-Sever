@@ -7,8 +7,8 @@ import (
 	"Dext-Server/utils"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/json"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -568,13 +568,24 @@ func GetPublicSurveyHandler(c *gin.Context) {
 	surveyUID := c.Param("uid")
 
 	// 验证问卷是否存在且状态为已发布
-	var survey model.Survey
+	// 同时关联 projects 表拿到创建者（p.create_by），用于精简版入口展示。
+	var (
+		survey     model.Survey
+		createTime sql.NullTime
+		createdBy  sql.NullString
+	)
 	err := db.QueryRow(`
-		SELECT id, survey_name, description, survey_status, COALESCE(auto_submit, FALSE), COALESCE(allow_anonymous, FALSE)
-		FROM surveys 
-		WHERE survey_uid = ? AND survey_status = 1
-          AND (deadline IS NULL OR deadline > NOW())`, surveyUID).
-		Scan(&survey.ID, &survey.SurveyName, &survey.Description, &survey.SurveyStatus, &survey.AutoSubmit, &survey.AllowAnonymous)
+		SELECT
+			s.id, s.survey_name, s.description, s.survey_status,
+			COALESCE(s.auto_submit, FALSE), COALESCE(s.allow_anonymous, FALSE),
+			s.create_time, p.create_by
+		FROM surveys s
+		JOIN projects p ON s.project_id = p.id
+		WHERE s.survey_uid = ? AND s.survey_status = 1
+		  AND (s.deadline IS NULL OR s.deadline > NOW())`, surveyUID).
+		Scan(&survey.ID, &survey.SurveyName, &survey.Description, &survey.SurveyStatus,
+			&survey.AutoSubmit, &survey.AllowAnonymous,
+			&createTime, &createdBy)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -775,6 +786,15 @@ func GetPublicSurveyHandler(c *gin.Context) {
 	}
 
 	// 返回公开访问的问卷信息
+	// createdAt / createdBy 给精简版入口展示用，统一用 RFC3339 时间格式
+	createdAt := ""
+	if createTime.Valid {
+		createdAt = createTime.Time.UTC().Format(time.RFC3339)
+	}
+	createdByValue := ""
+	if createdBy.Valid {
+		createdByValue = createdBy.String
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"surveyName":        survey.SurveyName,
 		"description":       survey.Description,
@@ -783,6 +803,8 @@ func GetPublicSurveyHandler(c *gin.Context) {
 		"mobileBackground":  mobileBg,
 		"autoSubmit":        survey.AutoSubmit,
 		"allowAnonymous":    survey.AllowAnonymous,
+		"createdAt":         createdAt,
+		"createdBy":         createdByValue,
 	})
 }
 

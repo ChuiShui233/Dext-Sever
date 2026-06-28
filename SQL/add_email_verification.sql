@@ -19,11 +19,6 @@ CREATE TABLE IF NOT EXISTS email_verifications (
     INDEX idx_user_id (user_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Email verification code table';
 
--- Add email verification status fields to users table
--- Using conditional logic to avoid errors if columns already exist
-ALTER TABLE users 
-ADD COLUMN email_verified BOOLEAN DEFAULT FALSE COMMENT 'Whether email is verified',
-ADD COLUMN email_verified_at DATETIME NULL COMMENT 'Email verification time';
-
--- Create index
-CREATE INDEX idx_users_email_verified ON users(email_verified);
+-- users.email_verified / email_verified_at 已在 database_schema.sql 中,
+-- 此前的 ALTER ADD COLUMN 是为老库升级,新装库由 CREATE TABLE 一次建好,留它会 1060。
+-- idx_users_email_verified 同理,已在 schema 中内联。

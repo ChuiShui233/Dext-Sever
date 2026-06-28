@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -139,6 +140,20 @@ func main() {
 			"audio/mpeg": true, "audio/wav": true, "audio/ogg": true, "audio/mp3": true, "audio/aac": true, "audio/flac": true, "audio/wma": true,
 			"application/pdf": true, "text/plain": true, "application/json": true, "application/xml": true,
 		},
+	}
+
+	assetsBackend := strings.ToLower(os.Getenv("ASSETS_BACKEND"))
+	if assetsBackend == "github" {
+		oaConfig.Backend = "github"
+		oaConfig.GitHub = assets.GitHubConfig{
+			Token:     os.Getenv("GITHUB_ASSETS_TOKEN"),
+			Owner:     os.Getenv("GITHUB_ASSETS_OWNER"),
+			Repo:      os.Getenv("GITHUB_ASSETS_REPO"),
+			Branch:    os.Getenv("GITHUB_ASSETS_BRANCH"),
+			CDNDomain: os.Getenv("GITHUB_ASSETS_CDN_DOMAIN"),
+		}
+		oaConfig.MaxFileSize = 25 * 1024 * 1024
+		log.Printf("[OpenAssets] 启用 GitHub 图床模式，MaxFileSize=25MB")
 	}
 
 	oaService, err := assets.NewService(oaConfig, db)

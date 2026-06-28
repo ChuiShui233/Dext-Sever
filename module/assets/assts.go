@@ -30,11 +30,13 @@ import (
 // Config 用于配置 OpenAssets 服务。
 type Config struct {
 	BaseURL        string          // 用于构建文件URL的基础URL（可选）；现在默认返回相对路径，避免域名变更造成死链
-	StoragePath    string          // 存储文件的根路径
+	StoragePath    string          // 存储文件的根路径（github 模式下作为本地缓存目录）
 	MaxFileSize    int64           // 单个文件上传的最大大小
 	MaxUserStorage int64           // 每个用户的最大总存储空间
 	AllowedTypes   map[string]bool // 允许的MIME类型映射
 	AuthRequired   bool            // API访问是否需要身份验证
+	Backend        string          // 存储后端: "local"（默认）或 "github"
+	GitHub         GitHubConfig    // GitHub 图床配置（Backend="github" 时生效）
 }
 
 // FileMetadata 存储有关已存储文件的信息。
@@ -64,6 +66,7 @@ type Service struct {
 	config      *Config
 	db          *sql.DB                  // 用于用户验证的数据库连接
 	assetsDB    *sql.DB                  // assets 文件元数据数据库连接
+	backend     StorageBackend           // 存储后端（local / github）
 	fileStore   map[string]*FileMetadata // 文件元数据的内存存储
 	nameIndex   map[string]*FileMetadata // 文件名索引: bucket/publicName -> metadata
 	userStorage map[string]*UserStorage  // 用户存储统计的内存存储
@@ -117,27 +120,7 @@ func stripQualitySuffix(name string) string {
 }
 
 func (s *Service) resolveStoragePath(bucket, filename string) (string, error) {
-	if !isSafeBucketName(bucket) {
-		return "", fmt.Errorf("invalid bucket")
-	}
-	if !isSafeFileName(filename) {
-		return "", fmt.Errorf("invalid filename")
-	}
-
-	baseAbs, err := filepath.Abs(s.config.StoragePath)
-	if err != nil {
-		return "", fmt.Errorf("resolve storage path failed: %w", err)
-	}
-	targetAbs, err := filepath.Abs(filepath.Join(baseAbs, bucket, filename))
-	if err != nil {
-		return "", fmt.Errorf("resolve file path failed: %w", err)
-	}
-
-	prefix := baseAbs + string(os.PathSeparator)
-	if targetAbs != baseAbs && !strings.HasPrefix(targetAbs, prefix) {
-		return "", fmt.Errorf("path escapes storage root")
-	}
-	return targetAbs, nil
+	return s.backend.LocalPath(bucket, filename)
 }
 
 func (s *Service) rebuildIndex() error {
@@ -284,7 +267,8 @@ func (s *Service) loadFromDB() error {
 	}
 
 	diskCount := s.countDiskFiles()
-	if count > 0 && count != diskCount {
+	// 仅本地后端强制磁盘与数据库一致；github 后端磁盘只是缓存，数量不匹配是正常的
+	if count > 0 && count != diskCount && s.backend.DiskAuthoritative() {
 		if shouldLog() {
 			log.Printf("[OpenAssets] 警告: 数据库记录数(%d)与磁盘文件数(%d)不匹配，清空数据库并重新导入", count, diskCount)
 		}
@@ -424,12 +408,40 @@ func NewService(config *Config, db *sql.DB) (*Service, error) {
 			log.Printf("[OpenAssets] 错误: 创建桶目录 [%s] 失败: %v", bucket, err)
 			return nil, fmt.Errorf("创建桶目录失败: %w", err)
 		}
+		// compressed 子目录始终基于本地缓存路径创建（压缩图只存本地）
+		if err := os.MkdirAll(filepath.Join(bucketPath, "compressed"), 0755); err != nil {
+			log.Printf("[OpenAssets] 错误: 创建桶压缩目录 [%s/compressed] 失败: %v", bucket, err)
+			return nil, fmt.Errorf("创建桶压缩目录失败: %w", err)
+		}
+	}
+
+	// 根据配置初始化存储后端
+	var backend StorageBackend
+	switch strings.ToLower(config.Backend) {
+	case "github":
+		// github 模式下 StoragePath 作为本地缓存目录
+		config.GitHub.StoragePath = config.StoragePath
+		githubBackend, err := newGitHubStorage(config.GitHub)
+		if err != nil {
+			return nil, fmt.Errorf("初始化 GitHub 存储后端失败: %w", err)
+		}
+		backend = githubBackend
+		if shouldLog() {
+			log.Printf("[OpenAssets] 信息: 使用 GitHub 存储后端 (owner=%s repo=%s branch=%s)",
+				config.GitHub.Owner, config.GitHub.Repo, config.GitHub.Branch)
+		}
+	default:
+		backend = newLocalStorage(config.StoragePath)
+		if shouldLog() {
+			log.Printf("[OpenAssets] 信息: 使用本地存储后端")
+		}
 	}
 
 	service := &Service{
 		config:      config,
 		db:          db,
 		assetsDB:    db,
+		backend:     backend,
 		fileStore:   make(map[string]*FileMetadata),
 		nameIndex:   make(map[string]*FileMetadata),
 		userStorage: make(map[string]*UserStorage),
@@ -616,36 +628,22 @@ func (s *Service) UploadFile(bucket, filename, originalName, contentType, owner 
 		}
 	}
 
-	filePath, err := s.resolveStoragePath(bucket, filename)
-	if err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
-		return nil, fmt.Errorf("创建桶目录失败: %w", err)
-	}
-
-	dst, err := os.Create(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("创建目标文件失败: %w", err)
-	}
-	defer dst.Close()
-
 	hash := md5.New()
 	// 限制读取，避免客户端伪报 size 导致超大文件写入
 	limited := io.LimitReader(fileData, s.config.MaxFileSize+1)
 	teeReader := io.TeeReader(limited, hash)
 
-	written, err := io.Copy(dst, teeReader)
+	// 通过存储后端写入：local 直接落盘；github 先落本地缓存再异步推送
+	written, err := s.backend.Put(bucket, filename, teeReader)
 	if err != nil {
-		os.Remove(filePath) // 失败时清理
 		return nil, fmt.Errorf("保存文件内容失败: %w", err)
 	}
 	if written > s.config.MaxFileSize {
-		_ = os.Remove(filePath)
+		_ = s.backend.Delete(bucket, filename)
 		return nil, fmt.Errorf("文件大小 (%d 字节) 超过允许的最大大小 (%d 字节)", written, s.config.MaxFileSize)
 	}
 	if err := s.checkUserStorageLimit(owner, written); err != nil {
-		_ = os.Remove(filePath)
+		_ = s.backend.Delete(bucket, filename)
 		return nil, err
 	}
 	md5Hash := hex.EncodeToString(hash.Sum(nil))
@@ -694,18 +692,38 @@ func (s *Service) DeleteFile(bucket, filename, owner string) error {
 	if err != nil {
 		return err
 	}
-	fileInfo, err := os.Stat(filePath)
-	if os.IsNotExist(err) {
-		return fmt.Errorf("文件未找到")
+
+	// 先从内存索引拿到元数据（用于存储配额回退和存在性判断）
+	s.mutex.RLock()
+	var meta *FileMetadata
+	for _, m := range s.fileStore {
+		if m.FileName == filename && m.Bucket == bucket && m.Owner == owner {
+			meta = m
+			break
+		}
 	}
-	if err != nil {
-		return fmt.Errorf("获取文件信息失败: %w", err)
+	s.mutex.RUnlock()
+
+	fileInfo, statErr := os.Stat(filePath)
+	// 本地缓存不存在时：github 后端仍可凭远端 SHA 删除；local 后端则视为未找到
+	if os.IsNotExist(statErr) {
+		if s.backend.DiskAuthoritative() {
+			return fmt.Errorf("文件未找到")
+		}
+		// github 模式：若索引中也没有，则视为未找到
+		if meta == nil {
+			return fmt.Errorf("文件未找到")
+		}
+	} else if statErr != nil {
+		return fmt.Errorf("获取文件信息失败: %w", statErr)
 	}
 
-	if err := os.Remove(filePath); err != nil {
+	// 通过存储后端删除：local 删本地；github 同时删远端和本地缓存
+	if err := s.backend.Delete(bucket, filename); err != nil {
 		return fmt.Errorf("删除物理文件失败: %w", err)
 	}
 
+	// 压缩图始终只存本地缓存，直接清理
 	compressedDir := filepath.Join(s.config.StoragePath, bucket, "compressed")
 	compressedBase := stripExtension(filename)
 	compressedFiles, _ := filepath.Glob(filepath.Join(compressedDir, compressedBase+"_*"))
@@ -740,12 +758,19 @@ func (s *Service) DeleteFile(bucket, filename, owner string) error {
 		}
 	}
 
+	// 计算要扣减的存储大小：优先用磁盘实际大小，磁盘不存在时回退到元数据记录
+	var sizeToDeduct int64
+	if fileInfo != nil {
+		sizeToDeduct = fileInfo.Size()
+	} else if meta != nil {
+		sizeToDeduct = meta.FileSize
+	}
 	userStorage, exists := s.userStorage[owner]
 	if !exists {
 		userStorage = &UserStorage{Username: owner}
 		s.userStorage[owner] = userStorage
 	}
-	userStorage.UsedSize -= fileInfo.Size()
+	userStorage.UsedSize -= sizeToDeduct
 	if userStorage.UsedSize < 0 {
 		userStorage.UsedSize = 0
 	}
@@ -900,7 +925,12 @@ func resizeImage(img image.Image, maxWidth int) image.Image {
 
 // generateCompressedImage 生成压缩图并保存到磁盘
 func (s *Service) generateCompressedImage(bucket, realFilename, compressedPath string, quality ImageQuality) error {
-	file, err := os.Open(filepath.Join(s.config.StoragePath, bucket, realFilename))
+	// 通过后端 Get 确保原图在本地缓存可用（github 模式下未命中会从 CDN 拉取）
+	originalPath, err := s.backend.Get(bucket, realFilename)
+	if err != nil {
+		return err
+	}
+	file, err := os.Open(originalPath)
 	if err != nil {
 		return err
 	}
@@ -1005,9 +1035,10 @@ func (s *Service) DownloadHandler(c *gin.Context) {
 		return
 	}
 
-	originalPath, err := s.resolveStoragePath(bucket, realFilename)
+	originalPath, err := s.backend.Get(bucket, realFilename)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的文件请求"})
+		log.Printf("拒绝连接: 获取文件失败 %s/%s: %v", bucket, realFilename, err)
+		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
 
