@@ -1,19 +1,26 @@
 # syntax=docker/dockerfile:1.6
 
+ARG REPO_URL=https://github.com/ChuiShui233/Dext-Sever.git
+ARG REPO_BRANCH=main
+
 FROM golang:1.24-alpine AS builder
+
+ARG REPO_URL
+ARG REPO_BRANCH
 
 ENV GOPROXY=https://goproxy.cn,direct \
     GOSUMDB=off
 
+RUN apk add --no-cache git
+
 WORKDIR /build
 
-COPY go.mod go.sum ./
-RUN go mod download
+RUN git clone --depth=1 --branch ${REPO_BRANCH} ${REPO_URL} . \
+    && rm -rf .git
 
-COPY . .
-
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -trimpath -ldflags="-s -w" -o /out/dext .
+RUN go mod download \
+    && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+       go build -trimpath -ldflags="-s -w" -o /out/dext .
 
 FROM alpine:3.20 AS runtime
 
@@ -28,7 +35,6 @@ RUN apk add --no-cache \
 WORKDIR /app
 
 COPY --from=builder /out/dext /app/dext
-COPY env_secret.py /app/env_secret.py
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 RUN mkdir -p /app/assets_storage /app/uploads /app/SSL /app/keys /app/bin /app/static \
@@ -36,10 +42,6 @@ RUN mkdir -p /app/assets_storage /app/uploads /app/SSL /app/keys /app/bin /app/s
     && adduser -D -u 1000 appuser \
     && chown -R 1000:1000 /app
 
-# HuggingFace Space 适配:
-# - 必须 listen 7860
-# - 必须以非 root (uid 1000) 运行
-# - HF 在前端终止 TLS, 后端只用 HTTP
 ENV PORT=7860 \
     HTTPS_ENABLED=false \
     TZ=Asia/Shanghai
