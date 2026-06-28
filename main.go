@@ -88,7 +88,7 @@ func main() {
 
 	// 初始化 Redis 客户端
 	if err := config.InitRedis(); err != nil {
-		log.Fatalf("无法连接到 Redis: %v", err)
+		log.Printf("警告: 无法连接到 Redis (将使用数据库降级模式): %v", err)
 	}
 
 	// 启动问卷到期自动完结计划任务

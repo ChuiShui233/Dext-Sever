@@ -21,8 +21,11 @@ func InitRedis() error {
 	})
 
 	ctx := context.Background()
-	_, err := RedisClient.Ping(ctx).Result()
-	return err
+	if _, err := RedisClient.Ping(ctx).Result(); err != nil {
+		RedisClient = nil // 连接失败时置空, 后续 AddToBlacklist 自动走数据库降级
+		return err
+	}
+	return nil
 }
 
 // 添加到Redis黑名单
