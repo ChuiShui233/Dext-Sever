@@ -279,112 +279,25 @@ func (s *service) UploadSurveyMedia(surveyID, username, originalFilename, conten
 		return nil, errors.New("无权上传文件到此问卷")
 	}
 
-	// 读取上传内容到内存以便处理（图片压缩/视频转码）。如需避免内存占用，可落盘到临时文件再处理。
+	// 读取上传内容到内存
 	rawBytes, err := ioutil.ReadAll(file)
 	if err != nil {
 		return nil, fmt.Errorf("读取上传内容失败: %w", err)
 	}
 
-	// 推断扩展名（以原始文件名为主）
+	// 推断扩展名
 	fileExt := strings.ToLower(filepath.Ext(originalFilename))
 	if fileExt == "" {
-		// 尝试从 contentType 反推
 		if exts, _ := mime.ExtensionsByType(contentType); len(exts) > 0 {
 			fileExt = exts[0]
 		}
 	}
-	processed := rawBytes
-	outExt := fileExt
-	outContentType := contentType
 
 	log.Printf("[Media] 接收上传: name=%s ext=%s type=%s size=%d", originalFilename, fileExt, contentType, len(rawBytes))
 
-	// 图片自动压缩：最大边1920。
-	if isImageExt(fileExt) {
-		if imgObj, format, err := image.Decode(bytes.NewReader(rawBytes)); err == nil {
-			// 缩放
-			maxSide := 1920
-			w := imgObj.Bounds().Dx()
-			h := imgObj.Bounds().Dy()
-			if w > maxSide || h > maxSide {
-				if w >= h {
-					imgObj = imaging.Resize(imgObj, maxSide, 0, imaging.Lanczos)
-				} else {
-					imgObj = imaging.Resize(imgObj, 0, maxSide, imaging.Lanczos)
-				}
-			}
-			// 透明图：保持 PNG，避免丢失透明；非透明：导出 JPEG 85
-			if hasAlpha(format) {
-				buf := &bytes.Buffer{}
-				if err := png.Encode(buf, imgObj); err == nil {
-					candidate := buf.Bytes()
-					// 若缩放后 PNG 更小则采用；否则保留原始
-					if len(candidate) < len(rawBytes) {
-						processed = candidate
-						outExt = ".png"
-						outContentType = "image/png"
-						log.Printf("[Media] 图片处理(透明PNG): 原始=%dB -> 输出(PNG)= %dB, 应用压缩", len(rawBytes), len(processed))
-					} else {
-						processed = rawBytes
-						outExt = fileExt
-						outContentType = contentType
-						log.Printf("[Media] 图片处理(透明PNG): 缩放后不更小 原始=%dB, 候选=%dB, 保留原始", len(rawBytes), len(candidate))
-					}
-				} else {
-					log.Printf("PNG编码失败，使用原始文件: %v", err)
-				}
-			} else {
-				buf := &bytes.Buffer{}
-				if err := jpeg.Encode(buf, imgObj, &jpeg.Options{Quality: 85}); err == nil {
-					candidate := buf.Bytes()
-					if len(candidate) < len(rawBytes) {
-						processed = candidate
-						outExt = ".jpg"
-						outContentType = "image/jpeg"
-						log.Printf("[Media] 图片处理(JPEG): 原始=%dB -> 输出(JPEG)= %dB, 应用压缩", len(rawBytes), len(processed))
-					} else {
-						processed = rawBytes
-						outExt = fileExt
-						outContentType = contentType
-						log.Printf("[Media] 图片处理(JPEG): 压缩后更大 原始=%dB, 候选=%dB, 保留原始", len(rawBytes), len(candidate))
-					}
-				} else {
-					log.Printf("JPEG编码失败，使用原始文件: %v", err)
-				}
-			}
-		} else {
-			log.Printf("图片解码失败，使用原始文件: %v", err)
-		}
-	}
-
-	// 视频可选转码：若系统存在 ffmpeg，则转为 MP4(H.264/AAC)
-	if isVideoExt(fileExt) {
-		if ffmpegPath, ok := getFFmpegPath(); ok {
-			log.Printf("[Media] 检测到 ffmpeg: %s，开始视频转码...", ffmpegPath)
-			before := len(processed)
-			out, err := transcodeToMP4With(ffmpegPath, processed)
-			if err != nil {
-				log.Printf("视频转码失败，使用原始文件: %v", err)
-			} else {
-				if len(out) < before {
-					processed = out
-					outExt = ".mp4"
-					outContentType = "video/mp4"
-					log.Printf("[Media] 视频转码采用: 原始=%dB -> 输出=%dB (更小)", before, len(processed))
-				} else {
-					log.Printf("[Media] 视频转码舍弃: 原始=%dB, 转码=%dB (不更小)，保留原始", before, len(out))
-				}
-			}
-		} else {
-			log.Printf("未检测到ffmpeg，跳过视频转码")
-		}
-	}
-
-	// 生成输出文件名（基于处理后的扩展名）
-	fileName := fmt.Sprintf("%s%s", generateUUID(), outExt)
-
-	// 上传到存储服务（使用处理后字节）
-	metadata, err := openAssetsService.UploadFile("survey-assets", fileName, originalFilename, outContentType, username, int64(len(processed)), bytes.NewReader(processed))
+	// 生成文件名并立即上传原图（快速返回，不阻塞客户端）
+	originalFileName := fmt.Sprintf("%s%s", generateUUID(), fileExt)
+	metadata, err := openAssetsService.UploadFile("survey-assets", originalFileName, originalFilename, contentType, username, int64(len(rawBytes)), bytes.NewReader(rawBytes))
 	if err != nil {
 		return nil, fmt.Errorf("文件上传到存储服务失败: %w", err)
 	}
@@ -392,18 +305,117 @@ func (s *service) UploadSurveyMedia(surveyID, username, originalFilename, conten
 	// 保存文件记录
 	fileRecordID, err := s.repo.SaveFileRecord(surveyID, username, metadata.FileName, metadata.URL, metadata.FileSize, metadata.ContentType)
 	if err != nil {
-		// 回滚：删除已上传的文件
 		_ = openAssetsService.DeleteFile(metadata.Bucket, metadata.FileName, username)
 		return nil, fmt.Errorf("保存文件记录失败: %w", err)
 	}
 
-	return &MediaUploadResult{
+	result := &MediaUploadResult{
 		URL:      metadata.URL,
 		Filename: metadata.FileName,
 		Size:     metadata.FileSize,
 		Type:     metadata.ContentType,
 		RecordID: fileRecordID,
-	}, nil
+	}
+
+	// 后台异步压缩/转码，如果处理后更小则替换原文件
+	go func(raw []byte, fileName, bucket, origURL string) {
+		processed := raw
+		outExt := fileExt
+		outContentType := contentType
+
+		// 图片压缩：最大边1920
+		if isImageExt(fileExt) {
+			if imgObj, format, err := image.Decode(bytes.NewReader(raw)); err == nil {
+				type resizeResult struct {
+					img  image.Image
+					done bool
+				}
+				resultCh := make(chan resizeResult, 1)
+				go func(srcImg image.Image) {
+					res := resizeResult{done: false}
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("图片缩放panic，恢复: %v", r)
+							res.img = srcImg
+						}
+						resultCh <- res
+					}()
+					maxSide := 1920
+					w := srcImg.Bounds().Dx()
+					h := srcImg.Bounds().Dy()
+					if w > maxSide || h > maxSide {
+						if w >= h {
+							srcImg = imaging.Resize(srcImg, maxSide, 0, imaging.Lanczos)
+						} else {
+							srcImg = imaging.Resize(srcImg, 0, maxSide, imaging.Lanczos)
+						}
+					}
+					res.img = srcImg
+					res.done = true
+				}(imgObj)
+
+				select {
+				case res := <-resultCh:
+					if res.done {
+						imgObj = res.img
+					} else {
+						imgObj = nil
+					}
+				case <-time.After(60 * time.Second):
+					log.Printf("图片缩放超时，保留原文件")
+					imgObj = nil
+				}
+
+				if imgObj != nil {
+					if hasAlpha(format) {
+						buf := &bytes.Buffer{}
+						if err := png.Encode(buf, imgObj); err == nil {
+							candidate := buf.Bytes()
+							if len(candidate) < len(raw) {
+								processed = candidate
+								outExt = ".png"
+								outContentType = "image/png"
+							}
+						}
+					} else {
+						buf := &bytes.Buffer{}
+						if err := jpeg.Encode(buf, imgObj, &jpeg.Options{Quality: 85}); err == nil {
+							candidate := buf.Bytes()
+							if len(candidate) < len(raw) {
+								processed = candidate
+								outExt = ".jpg"
+								outContentType = "image/jpeg"
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// 视频转码：若系统存在 ffmpeg
+		if isVideoExt(fileExt) {
+			if ffmpegPath, ok := getFFmpegPath(); ok {
+				if out, err := transcodeToMP4With(ffmpegPath, processed); err == nil && len(out) < len(processed) {
+					processed = out
+					outExt = ".mp4"
+					outContentType = "video/mp4"
+				}
+			}
+		}
+
+		// 如果处理后更小，替换原文件
+		if len(processed) < len(raw) {
+			newFileName := fmt.Sprintf("%s%s", generateUUID(), outExt)
+			if meta, err := openAssetsService.UploadFile(bucket, newFileName, originalFilename, outContentType, username, int64(len(processed)), bytes.NewReader(processed)); err == nil {
+				log.Printf("[Media] 后台压缩替换: %s -> %s (%dB -> %dB)", origURL, meta.URL, len(raw), len(processed))
+				_ = s.repo.UpdateFileNameAndURL(fileRecordID, newFileName, meta.URL)
+			} else {
+				log.Printf("[Media] 后台压缩文件上传失败: %v", err)
+			}
+		}
+	}(rawBytes, originalFileName, "survey-assets", metadata.URL)
+
+	return result, nil
 }
 
 func (s *service) DeleteSurveyMedia(surveyID, fileID, username string, openAssetsService *assets.Service) (string, error) {

@@ -11,6 +11,8 @@ type Repository interface {
 	// 问卷媒体文件相关
 	CheckSurveyOwnership(surveyID, username string) (bool, error)
 	SaveFileRecord(surveyID, username, fileName, fileURL string, fileSize int64, contentType string) (int64, error)
+	UpdateFileURL(recordID int64, newURL string) error
+	UpdateFileNameAndURL(recordID int64, newFileName, newURL string) error
 	GetFileInfo(fileID, surveyID, username string) (string, error)
 	DeleteFileRecord(fileID, surveyID string) error
 	ListSurveyMediaFiles(surveyID string) ([]model.SurveyMediaFile, error)
@@ -54,6 +56,16 @@ func (r *mediaRepository) SaveFileRecord(surveyID, username, fileName, fileURL s
 		return 0, fmt.Errorf("插入文件记录失败: %w", err)
 	}
 	return result.LastInsertId()
+}
+
+func (r *mediaRepository) UpdateFileURL(recordID int64, newURL string) error {
+	_, err := config.DB.Exec("UPDATE survey_assets_files SET file_url = ? WHERE id = ?", newURL, recordID)
+	return err
+}
+
+func (r *mediaRepository) UpdateFileNameAndURL(recordID int64, newFileName, newURL string) error {
+	_, err := config.DB.Exec("UPDATE survey_assets_files SET file_name = ?, file_url = ? WHERE id = ?", newFileName, newURL, recordID)
+	return err
 }
 
 func (r *mediaRepository) GetFileInfo(fileID, surveyID, username string) (string, error) {

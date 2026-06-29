@@ -32,6 +32,7 @@ RUN apk add --no-cache \
         tzdata \
         python3 \
         wget \
+        ffmpeg \
     && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
     && echo "Asia/Shanghai" > /etc/timezone
 

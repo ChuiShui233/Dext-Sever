@@ -341,6 +341,10 @@ func AddSurveyQuestionHandler(c *gin.Context) {
 	question.SurveyID, _ = strconv.Atoi(surveyID)
 	question.Order = maxOrder + 1
 
+	// 记录旧选项ID → 新选项ID 的映射（用于修复 jumpLogic）
+	oldToNewOptionID := make(map[int]int)
+	newJumpLogic := make(map[int]int)
+
 	// 插入选项
 	for i, opt := range question.Options {
 		// 兼容前端字段名：text -> option_text, mediaUrl -> media_url
@@ -373,7 +377,7 @@ func AddSurveyQuestionHandler(c *gin.Context) {
 			}
 		}
 
-		_, err = tx.Exec(`
+		result, err = tx.Exec(`
             INSERT INTO question_options (question_id, option_text, option_order, media_url, destination_question_id, custom_input_placeholder)
             VALUES (?, ?, ?, ?, ?, ?)`,
 			opt.QuestionID, opt.OptionText, opt.Order, opt.MediaURL, opt.Destination, opt.CustomInputPlaceholder)
@@ -381,6 +385,31 @@ func AddSurveyQuestionHandler(c *gin.Context) {
 			log.Printf("插入选项失败: %v", err)
 			tx.Rollback()
 			utils.SendError(c, http.StatusInternalServerError, "插入选项失败")
+			return
+		}
+
+		// 记录旧ID → 新DB ID 的映射
+		newOptID, _ := result.LastInsertId()
+		oldToNewOptionID[opt.ID] = int(newOptID)
+	}
+
+	// 用新选项ID重建 jumpLogic（key 从旧前端ID 映射到新 DB ID）
+	hasJumpLogic := false
+	for oldOptID, targetQID := range question.JumpLogic {
+		if newOptID, ok := oldToNewOptionID[oldOptID]; ok {
+			newJumpLogic[newOptID] = targetQID
+			hasJumpLogic = true
+		}
+	}
+
+	// 如果有跳题逻辑，更新 questions.jump_logic
+	if hasJumpLogic {
+		updatedJumpLogicJSON, _ := json.Marshal(newJumpLogic)
+		_, err = tx.Exec("UPDATE questions SET jump_logic = ? WHERE id = ?", updatedJumpLogicJSON, questionID)
+		if err != nil {
+			log.Printf("更新 jump_logic 失败: %v", err)
+			tx.Rollback()
+			utils.SendError(c, http.StatusInternalServerError, "更新跳题逻辑失败")
 			return
 		}
 	}
@@ -458,6 +487,10 @@ func UpdateSurveyQuestionHandler(c *gin.Context) {
 		return
 	}
 
+	// 记录旧选项ID → 新选项ID 的映射（用于修复 jumpLogic）
+	oldToNewOptionID := make(map[int]int)
+	newJumpLogic := make(map[int]int)
+
 	// 插入新选项
 	for i, opt := range question.Options {
 		// 兼容前端字段名：text -> option_text, mediaUrl -> media_url
@@ -490,13 +523,39 @@ func UpdateSurveyQuestionHandler(c *gin.Context) {
 			}
 		}
 
-		_, err = tx.Exec(`
+		result, err := tx.Exec(`
             INSERT INTO question_options (question_id, option_text, option_order, media_url, destination_question_id, custom_input_placeholder)
             VALUES (?, ?, ?, ?, ?, ?)`,
 			opt.QuestionID, opt.OptionText, opt.Order, opt.MediaURL, opt.Destination, opt.CustomInputPlaceholder)
 		if err != nil {
 			log.Printf("插入新选项失败: %v", err)
+			tx.Rollback()
 			utils.SendError(c, http.StatusInternalServerError, "更新选项失败")
+			return
+		}
+
+		// 记录旧ID → 新DB ID 的映射（前端传的是旧ID，LastInsertId 是新ID）
+		newID64, _ := result.LastInsertId()
+		oldToNewOptionID[opt.ID] = int(newID64)
+	}
+
+	// 用新选项ID重建 jumpLogic（key 从旧前端ID 映射到新 DB ID）
+	hasJumpLogic := false
+	for oldOptID, targetQID := range question.JumpLogic {
+		if newOptID, ok := oldToNewOptionID[oldOptID]; ok {
+			newJumpLogic[newOptID] = targetQID
+			hasJumpLogic = true
+		}
+	}
+
+	// 如果有跳题逻辑，更新 questions.jump_logic
+	if hasJumpLogic {
+		updatedJumpLogicJSON, _ := json.Marshal(newJumpLogic)
+		_, err = tx.Exec("UPDATE questions SET jump_logic = ? WHERE id = ?", updatedJumpLogicJSON, questionID)
+		if err != nil {
+			log.Printf("更新 jump_logic 失败: %v", err)
+			tx.Rollback()
+			utils.SendError(c, http.StatusInternalServerError, "更新跳题逻辑失败")
 			return
 		}
 	}
