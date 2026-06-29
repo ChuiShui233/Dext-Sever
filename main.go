@@ -165,6 +165,9 @@ func main() {
 	// 设置 media 模块的 OpenAssets 服务实例
 	media.SetOpenAssetsService(openAssetsService)
 
+	// 启动时迁移旧路径头像（./uploads/avatars/ → ./assets_storage/user-avatars/）
+	media.MigrateAvatars()
+
 	// 初始化清理模块
 	clean.InitCleaner()
 	log.Println("清理模块已初始化")

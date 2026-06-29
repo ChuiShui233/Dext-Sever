@@ -568,24 +568,26 @@ func GetPublicSurveyHandler(c *gin.Context) {
 	surveyUID := c.Param("uid")
 
 	// 验证问卷是否存在且状态为已发布
-	// 同时关联 projects 表拿到创建者（p.create_by），用于精简版入口展示。
+	// 同时关联 projects 表拿到创建者（p.create_by），并 LEFT JOIN users 拿头像
 	var (
-		survey     model.Survey
-		createTime sql.NullTime
-		createdBy  sql.NullString
+		survey        model.Survey
+		createTime    sql.NullTime
+		createdBy     sql.NullString
+		creatorAvatar sql.NullString
 	)
 	err := db.QueryRow(`
 		SELECT
 			s.id, s.survey_name, s.description, s.survey_status,
 			COALESCE(s.auto_submit, FALSE), COALESCE(s.allow_anonymous, FALSE),
-			s.create_time, p.create_by
+			s.create_time, p.create_by, u.avatar_url
 		FROM surveys s
 		JOIN projects p ON s.project_id = p.id
+		LEFT JOIN users u ON u.username = p.create_by AND u.is_delete = 0
 		WHERE s.survey_uid = ? AND s.survey_status = 1
 		  AND (s.deadline IS NULL OR s.deadline > NOW())`, surveyUID).
 		Scan(&survey.ID, &survey.SurveyName, &survey.Description, &survey.SurveyStatus,
 			&survey.AutoSubmit, &survey.AllowAnonymous,
-			&createTime, &createdBy)
+			&createTime, &createdBy, &creatorAvatar)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -786,7 +788,6 @@ func GetPublicSurveyHandler(c *gin.Context) {
 	}
 
 	// 返回公开访问的问卷信息
-	// createdAt / createdBy 给精简版入口展示用，统一用 RFC3339 时间格式
 	createdAt := ""
 	if createTime.Valid {
 		createdAt = createTime.Time.UTC().Format(time.RFC3339)
@@ -794,6 +795,10 @@ func GetPublicSurveyHandler(c *gin.Context) {
 	createdByValue := ""
 	if createdBy.Valid {
 		createdByValue = createdBy.String
+	}
+	creatorAvatarValue := ""
+	if creatorAvatar.Valid {
+		creatorAvatarValue = creatorAvatar.String
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"surveyName":        survey.SurveyName,
@@ -805,6 +810,7 @@ func GetPublicSurveyHandler(c *gin.Context) {
 		"allowAnonymous":    survey.AllowAnonymous,
 		"createdAt":         createdAt,
 		"createdBy":         createdByValue,
+		"creatorAvatar":     creatorAvatarValue,
 	})
 }
 

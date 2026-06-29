@@ -39,7 +39,7 @@ type Service interface {
 	GetSurveyBackground(surveyID int) (*BackgroundInfo, error)
 
 	// 头像相关
-	UploadAvatar(username string, file io.Reader, filename string, fileSize int64) (string, error)
+	UploadAvatar(username string, file io.Reader, filename string, fileSize int64, openAssetsService *assets.Service) (string, error)
 }
 
 // 判断是否图片扩展名
@@ -523,45 +523,71 @@ func (s *service) GetSurveyBackground(surveyID int) (*BackgroundInfo, error) {
 
 // ===== 头像相关 =====
 
-func (s *service) UploadAvatar(username string, file io.Reader, filename string, fileSize int64) (string, error) {
-	// 验证文件大小
+func (s *service) UploadAvatar(username string, file io.Reader, filename string, fileSize int64, openAssetsService *assets.Service) (string, error) {
 	if fileSize > 5*1024*1024 {
 		return "", errors.New("头像文件大小不能超过5MB")
 	}
 
-	// 验证文件类型
 	ext := strings.ToLower(filepath.Ext(filename))
 	if ext != ".jpg" && ext != ".jpeg" && ext != ".png" && ext != ".webp" {
 		return "", errors.New("仅支持JPG, PNG, WEBP格式的头像")
 	}
 
-	// 生成文件名
-	fileName := fmt.Sprintf("avatars/%s%s", generateUUID(), ext)
-	filePath := filepath.Join("./uploads", fileName)
+	contentType := mime.TypeByExtension(ext)
+	if contentType == "" {
+		switch ext {
+		case ".jpg", ".jpeg":
+			contentType = "image/jpeg"
+		case ".png":
+			contentType = "image/png"
+		case ".webp":
+			contentType = "image/webp"
+		}
+	}
 
-	// 创建目录
+	fileName := fmt.Sprintf("%s%s", generateUUID(), ext)
+
+	if openAssetsService != nil && openAssetsService.Config().Backend == "github" {
+		data, err := io.ReadAll(file)
+		if err != nil {
+			return "", fmt.Errorf("读取头像数据失败: %w", err)
+		}
+		metadata, err := openAssetsService.UploadFile("user-avatars", fileName, fileName, contentType, username, int64(len(data)), bytes.NewReader(data))
+		if err != nil {
+			return "", fmt.Errorf("上传头像到图床失败: %w", err)
+		}
+		if err := s.repo.UpdateAvatar(username, metadata.URL); err != nil {
+			return "", fmt.Errorf("更新头像URL失败: %w", err)
+		}
+		return metadata.URL, nil
+	}
+
+	filePath := filepath.Join("./assets_storage", "user-avatars", fileName)
 	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
 		return "", fmt.Errorf("创建头像目录失败: %w", err)
 	}
-
-	// 保存文件
 	out, err := os.Create(filePath)
 	if err != nil {
 		return "", fmt.Errorf("创建头像文件失败: %w", err)
 	}
 	defer out.Close()
-
 	if _, err := io.Copy(out, file); err != nil {
 		return "", fmt.Errorf("保存头像文件失败: %w", err)
 	}
 
-	// 更新数据库
-	avatarURL := fmt.Sprintf("/uploads/%s", fileName)
+	avatarURL := fmt.Sprintf("/openassets/files/user-avatars/%s", stripExt(fileName))
 	if err := s.repo.UpdateAvatar(username, avatarURL); err != nil {
 		return "", fmt.Errorf("更新头像URL失败: %w", err)
 	}
-
 	return avatarURL, nil
+}
+
+func stripExt(name string) string {
+	ext := filepath.Ext(name)
+	if ext == "" {
+		return name
+	}
+	return strings.TrimSuffix(name, ext)
 }
 
 // ===== 工具函数 =====

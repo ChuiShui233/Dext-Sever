@@ -1026,13 +1026,16 @@ func (s *Service) DownloadHandler(c *gin.Context) {
 		return
 	}
 
+	originalName := publicName
 	publicName = stripExtension(publicName)
 
 	realFilename, err := s.findRealFilename(bucket, publicName)
 	if err != nil {
-		log.Printf("拒绝连接: 访问不存在的文件 %s/%s: %v", bucket, publicName, err)
-		c.AbortWithStatus(http.StatusNotFound)
-		return
+		// DB/索引里没记录，常见原因：
+		//   1) 外部直接 push 到 storage 目录或 GitHub 图床的文件（没走 OpenAssets 上传流程）
+		//   2) 老数据在重启后内存索引丢失
+		// 兜底：使用 URL 中原始文件名（保留扩展名）让 backend 自己拉取，本地缓存未命中时会从 CDN 拉取
+		realFilename = originalName
 	}
 
 	originalPath, err := s.backend.Get(bucket, realFilename)

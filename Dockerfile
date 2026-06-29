@@ -2,11 +2,13 @@
 
 ARG REPO_URL=https://github.com/ChuiShui233/Dext-Sever.git
 ARG REPO_BRANCH=main
+ARG CACHE_BUSTER=0
 
 FROM golang:1.24-alpine AS builder
 
 ARG REPO_URL
 ARG REPO_BRANCH
+ARG CACHE_BUSTER
 
 ENV GOPROXY=https://goproxy.cn,direct \
     GOSUMDB=off
@@ -15,7 +17,8 @@ RUN apk add --no-cache git
 
 WORKDIR /build
 
-RUN git clone --depth=1 --branch ${REPO_BRANCH} ${REPO_URL} . \
+RUN echo "cache buster: ${CACHE_BUSTER}" \
+    && git clone --depth=1 --branch ${REPO_BRANCH} ${REPO_URL} . \
     && rm -rf .git
 
 RUN go mod download \

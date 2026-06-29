@@ -213,7 +213,7 @@ func UploadAvatarHandler(c *gin.Context) {
 	}
 	defer openedFile.Close()
 
-	avatarURL, err := mediaService.UploadAvatar(username, openedFile, file.Filename, file.Size)
+	avatarURL, err := mediaService.UploadAvatar(username, openedFile, file.Filename, file.Size, openAssetsService)
 	if err != nil {
 		log.Printf("上传头像失败: %v", err)
 		utils.SendError(c, http.StatusBadRequest, err.Error())
